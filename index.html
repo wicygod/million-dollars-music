@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Музыкальный плеер</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body class="bg-[#0a0a0a] text-white h-screen w-full overflow-hidden flex flex-col" id="appRoot">
+
+    <!-- ===== ШАПКА ===== -->
+    <header class="h-16 w-full shrink-0 border-b border-white/10 flex items-center justify-center gap-4 px-4">
+
+      <button id="hdrHome" class="group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+        <span class="tooltip">Главная</span>
+      </button>
+      <button id="hdrExplore" class="group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+        <span class="tooltip">Обзор</span>
+      </button>
+      <button id="hdrFav" class="group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+        <span class="tooltip">Избранное</span>
+      </button>
+
+      <div class="search-island flex items-center justify-between px-6 py-3 flex-1 max-w-md">
+        <input id="searchInput" type="text" placeholder="Поиск треков или артистов..." class="w-full bg-transparent text-base text-white/80 placeholder-white/40 outline-none border-none" />
+        <button id="clearSearch" class="text-white/40 hover:text-white/80 transition-all duration-300 hidden shrink-0 cursor-pointer active:scale-90" type="button" title="Очистить поиск">
+          <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+        <button id="searchSubmit" class="text-white/40 hover:text-white/80 transition-all duration-300 shrink-0 cursor-pointer active:scale-90 ml-2" type="button" title="Искать">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        </button>
+      </div>
+
+      <button id="hdrNotifications" class="group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+        <span class="tooltip">Уведомления</span>
+      </button>
+      <button id="hdrRadio" class="group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19l-5-5m0 0l5-5m-5 5h14m-5 5l5-5m0 0l-5-5"/></svg>
+        <span class="tooltip">Радио и миксы</span>
+      </button>
+      <button id="hdrProfile" class="group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+        <span class="tooltip">Мой профиль</span>
+      </button>
+      <button id="hdrSettings" class="group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <span class="tooltip">Настройки</span>
+      </button>
+    </header>
+
+    <!-- ===== НИЖНЯЯ ЗОНА ===== -->
+    <div class="flex flex-row flex-1 overflow-hidden">
+
+      <aside class="sidebar w-64 shrink-0 overflow-y-auto border-r border-white/10 px-5 pt-0 pb-5 flex flex-col">
+        <div class="playlist-header flex items-center justify-between mb-3">
+          <div class="playlist-heading text-xs font-semibold text-white/40 uppercase tracking-widest">Плейлисты</div>
+          <button id="createPlaylistBtn" class="w-7 h-7 rounded-full text-white/45 hover:text-white hover:bg-white/5 border border-white/5 cursor-pointer transition-all duration-300 active:scale-95" type="button" title="Создать плейлист">
+            <span class="text-lg leading-none">+</span>
+          </button>
+        </div>
+        <div class="space-y-1 text-sm text-white/50" id="sidebarPlaylistContainer">
+          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 text-white cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="focus">🎧 Focus Flow</div>
+          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="late">🌙 Late Nights</div>
+          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="energy">⚡ Energy Boost</div>
+          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="chill">🧘 Chill Vibes</div>
+          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="indie">🎵 Indie Mix</div>
+          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="piano">🎹 Piano</div>
+        </div>
+        <form id="createPlaylistForm" class="hidden mt-2 rounded-xl bg-white/[0.03] border border-white/10 p-2">
+          <input id="newPlaylistName" type="text" maxlength="40" placeholder="Название плейлиста" class="w-full bg-transparent text-sm text-white/80 placeholder-white/30 outline-none border-none px-2 py-1.5" />
+          <div class="flex items-center gap-2 mt-2">
+            <button id="savePlaylistBtn" type="submit" class="flex-1 px-3 py-1.5 rounded-lg bg-white text-black text-xs font-semibold hover:scale-[1.02] transition-all duration-300 active:scale-95 cursor-pointer">Создать</button>
+            <button id="cancelPlaylistBtn" type="button" class="px-3 py-1.5 rounded-lg bg-white/5 text-white/60 text-xs hover:text-white transition-all duration-300 cursor-pointer">Отмена</button>
+          </div>
+          <p id="playlistFormError" class="hidden text-[11px] text-red-300 mt-2 px-2"></p>
+        </form>
+        <div class="mt-auto pt-6 text-sm text-white/30">
+          <div id="likedTracks" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]">
+            <svg class="w-5 h-5 shrink-0 text-[#ff4d4d]" fill="currentColor" stroke="#ff4d4d" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.08C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+            Любимые треки
+          </div>
+        </div>
+      </aside>
+
+      <div class="flex-1 overflow-y-auto px-6 pt-4 pb-4 custom-scroll" id="appContent"></div>
+    </div>
+
+    <!-- ===== ПЛЕЕР-БАР ===== -->
+    <footer class="player-bar w-full shrink-0 border-t border-white/10">
+      <div class="flex items-center gap-4 px-5 h-full max-w-screen-2xl mx-auto w-full">
+        <div class="flex items-center gap-3 min-w-0 w-64 shrink-0">
+          <div id="nowPlayingArt" class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shrink-0 flex items-center justify-center text-sm border border-white/10 relative">♪</div>
+          <div class="min-w-0">
+            <p id="nowPlayingTitle" class="text-sm font-medium truncate">Obsessed</p>
+            <p id="nowPlayingArtist" class="text-xs text-white/40 truncate">Mariah Carey</p>
+          </div>
+          <button id="likeBtn" class="text-white/30 hover:text-red-400 transition-all duration-300 shrink-0 cursor-pointer active:scale-90">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+          </button>
+          <button id="addToPlaylistBtn" class="text-white/30 hover:text-indigo-400 transition-all duration-300 shrink-0 cursor-pointer active:scale-90 relative" title="Добавить в плейлист">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          </button>
+        </div>
+        <div class="flex-1 flex flex-col items-center justify-center gap-1 min-w-0">
+          <div class="flex items-center gap-5">
+            <button id="repeatBtn" class="text-white/40 hover:text-indigo-400 transition-all duration-300 cursor-pointer active:scale-90">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+            <button id="prevBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
+            </button>
+            <button id="playBtn" class="w-9 h-9 rounded-full bg-white flex items-center justify-center hover:scale-110 transition-all duration-300 cursor-pointer active:scale-90 hover:shadow-[0_0_20px_rgba(255,255,255,0.3)]">
+              <svg id="playIcon" class="w-4 h-4 text-black ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <button id="nextBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+            </button>
+            <button id="shufflePlayBtn" class="text-white/40 hover:text-indigo-400 transition-all duration-300 cursor-pointer active:scale-90">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z"/></svg>
+            </button>
+          </div>
+          <div class="flex items-center gap-3 w-full max-w-xl">
+            <span id="currentTime" class="text-xs text-white/40 w-10 text-right tabular-nums">0:00</span>
+            <div id="timelineContainer" class="relative w-full h-1.5 bg-white/10 rounded-full group cursor-pointer">
+              <div id="timelineFill" class="absolute left-0 top-0 h-full w-0 bg-white rounded-full group-hover:bg-indigo-400 transition-all duration-300"></div>
+              <div id="timelineThumb" class="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md opacity-0 group-hover:opacity-100 transition-all duration-300" style="left: 0%;"></div>
+            </div>
+            <span id="totalTime" class="text-xs text-white/40 w-10 tabular-nums">0:00</span>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 w-36 shrink-0 justify-end">
+          <button id="volumeBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
+          </button>
+          <div id="volumeContainer" class="relative w-full h-1.5 bg-white/10 rounded-full group cursor-pointer">
+            <div id="volFill" class="absolute left-0 top-0 h-full w-[75%] bg-white rounded-full group-hover:bg-indigo-400 transition-all duration-300"></div>
+            <div id="volThumb" class="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md opacity-0 group-hover:opacity-100 transition-all duration-300" style="left: 75%;"></div>
+          </div>
+        </div>
+      </div>
+    </footer>
+
+    <!-- ===== ФОКУС-РЕЖИМ (overlay) ===== -->
+    <div id="focusOverlay">
+      <button id="focusBack" class="absolute top-6 left-6 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-all duration-300 cursor-pointer active:scale-90 text-white/70">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      </button>
+      <div class="flex flex-col items-center justify-center flex-1 gap-5 px-8">
+        <div id="focusArt" class="w-72 h-72 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 shrink-0 border border-white/10 shadow-2xl"></div>
+        <div class="text-center max-w-md">
+          <p id="focusTitle" class="text-2xl font-bold tracking-tight">Obsessed</p>
+          <p id="focusArtist" class="text-sm text-white/50 mt-1">Mariah Carey</p>
+        </div>
+        <div class="flex items-center gap-3 w-full max-w-sm">
+          <span id="focusCurrentTime" class="text-xs text-white/40 w-8 text-right tabular-nums">0:00</span>
+          <div id="focusTimeline" class="relative flex-1 h-1.5 bg-white/10 rounded-full group cursor-pointer">
+            <div id="focusTimelineFill" class="absolute left-0 top-0 h-full w-0 bg-white rounded-full group-hover:bg-indigo-400 transition-all duration-300"></div>
+            <div id="focusTimelineThumb" class="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md opacity-0 group-hover:opacity-100 transition-all duration-300" style="left: 0%;"></div>
+          </div>
+          <span id="focusTotalTime" class="text-xs text-white/40 w-8 tabular-nums">0:00</span>
+        </div>
+        <button id="focusLikeBtn" class="text-white/30 hover:text-red-400 transition-all duration-300 cursor-pointer active:scale-90">
+          <svg class="w-12 h-12 heart-beat" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+        </button>
+      </div>
+    </div>
+
+  </body>
+</html>

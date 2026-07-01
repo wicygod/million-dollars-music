@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/admin.css" />
+    <title>Million Dollars Admin</title>
+    <script type="module" src="/src/admin.ts" defer></script>
+  </head>
+  <body>
+    <main class="admin-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">MD</span>
+          <div>
+            <strong>Admin Console</strong>
+            <small>hiplet monitor</small>
+          </div>
+        </div>
+        <nav>
+          <button class="nav-item is-active" data-target="dashboardPanel">Dashboard</button>
+          <button class="nav-item" data-target="logsPanel">Live Logs</button>
+          <button class="nav-item" data-target="topTracksPanel">Top Tracks</button>
+          <button class="nav-item" data-target="helpdeskPanel">Helpdesk</button>
+        </nav>
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          <span id="backendStatus">Connecting</span>
+        </div>
+      </aside>
+
+      <section class="content">
+        <header class="topbar">
+          <div>
+            <p>Million Dollars Music</p>
+            <h1>Server Operations</h1>
+          </div>
+          <div class="host-card">
+            <span>Host</span>
+            <strong id="hostName">hiplet</strong>
+          </div>
+        </header>
+
+        <section class="metric-grid" id="dashboardPanel">
+          <article class="metric-panel">
+            <div class="metric-head">
+              <span>CPU Load</span>
+              <strong id="cpuValue">0%</strong>
+            </div>
+            <div class="meter"><span id="cpuBar"></span></div>
+            <svg id="cpuSpark" class="spark" viewBox="0 0 220 48" preserveAspectRatio="none"></svg>
+          </article>
+          <article class="metric-panel">
+            <div class="metric-head">
+              <span>RAM Usage</span>
+              <strong id="ramValue">0%</strong>
+            </div>
+            <div class="meter"><span id="ramBar"></span></div>
+            <p id="ramBytes" class="muted">0 / 0 MB</p>
+          </article>
+          <article class="metric-panel compact">
+            <span>Uptime</span>
+            <strong id="uptimeValue">0m</strong>
+            <p class="muted">Backend process</p>
+          </article>
+          <article class="metric-panel compact">
+            <span>Users</span>
+            <strong id="usersValue">0</strong>
+            <p class="muted"><span id="sessionsValue">0</span> active / 24h</p>
+          </article>
+          <article class="metric-panel compact">
+            <span>Total plays</span>
+            <strong id="playsValue">0</strong>
+            <p class="muted"><span id="bannedValue">0</span> banned</p>
+          </article>
+        </section>
+
+        <section class="main-grid">
+          <article class="panel logs-panel" id="logsPanel">
+            <div class="panel-title">
+              <h2>Live Logs</h2>
+              <span id="logCount">0 events</span>
+            </div>
+            <div id="logsList" class="logs-list"></div>
+          </article>
+
+          <article class="panel" id="topTracksPanel">
+            <div class="panel-title">
+              <h2>Top Tracks</h2>
+              <span>Top 10</span>
+            </div>
+            <div id="topTracks" class="track-list"></div>
+          </article>
+        </section>
+
+        <section class="panel users-panel" id="helpdeskPanel">
+          <div class="panel-title">
+            <h2>Helpdesk</h2>
+            <span>Real user control</span>
+          </div>
+          <div id="usersTable" class="users-table"></div>
+          <div id="userDetail" class="user-detail muted">Select a user to inspect account data.</div>
+        </section>
+      </section>
+    </main>
+    <div id="toast" class="toast">Done</div>
+  </body>
+</html>
