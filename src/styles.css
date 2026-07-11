@@ -2862,6 +2862,17 @@ body.auth-locked .mobile-nav {
   background: rgba(255, 255, 255, 0.055);
 }
 
+.player-empty-art {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.12), rgba(103, 212, 255, 0.06));
+  color: rgba(255, 255, 255, 0.32);
+}
+
+.player-bar button:disabled,
+#focusOverlay button:disabled {
+  pointer-events: none;
+  opacity: 0.34;
+}
+
 #nowPlayingArt {
   width: 58px !important;
   height: 58px !important;

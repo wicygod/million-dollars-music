@@ -98,6 +98,7 @@ let player = {
   repeat: false,
   shuffle: false,
 };
+let keepPlayerEmptyUntilSelection = false;
 
 const nowPlayingTitle = document.getElementById("nowPlayingTitle")!;
 const nowPlayingArtist = document.getElementById("nowPlayingArtist")!;
@@ -245,6 +246,7 @@ function syncAmbientForTrack(track: Track) {
 }
 
 function syncNowPlayingUi(track: Track) {
+  keepPlayerEmptyUntilSelection = false;
   nowPlayingTitle.textContent = track.title;
   nowPlayingArtist.textContent = track.artist;
   applyCoverToElement(nowPlayingArt, track, "w-12 h-12 rounded-xl shrink-0 flex items-center justify-center text-sm border border-white/10 relative overflow-hidden");
@@ -255,7 +257,47 @@ function syncNowPlayingUi(track: Track) {
   focusTotalTime.textContent = track.durationLabel;
   syncAmbientForTrack(track);
   nowPlayingFocus.setAttribute("aria-label", `Открыть полноэкранный плеер: ${track.title} — ${track.artist}`);
+  [nowPlayingFocus, playBtn, prevBtn, nextBtn, likeBtn, queueBtn, focusPlayBtn, focusPrevBtn, focusNextBtn, focusQueueBtn, focusLikeBtn]
+    .forEach((button) => button.toggleAttribute("disabled", false));
   updateLikeButton();
+}
+
+function resetPlayerForNewAccount() {
+  stopAudio();
+  keepPlayerEmptyUntilSelection = true;
+  player.playing = false;
+  player.buffering = false;
+  player.currentTime = 0;
+  player.currentTrackId = "";
+  player.queue = [];
+  player.queueIndex = -1;
+  lastHistoryTrackId = null;
+  lastHistoryRecordedAt = 0;
+
+  document.querySelector<HTMLButtonElement>(".queue-close")?.click();
+  if (focusOverlay.classList.contains("active")) closeFocusPlayer();
+
+  nowPlayingTitle.textContent = "Выберите трек";
+  nowPlayingArtist.textContent = "Музыка появится здесь";
+  nowPlayingArt.className = "w-12 h-12 rounded-xl shrink-0 flex items-center justify-center text-lg border border-white/10 relative overflow-hidden player-empty-art";
+  nowPlayingArt.style.removeProperty("--cover-url");
+  nowPlayingArt.innerHTML = "<span aria-hidden=\"true\">♪</span>";
+  focusTitle.textContent = "Выберите трек";
+  focusArtist.textContent = "Музыка появится здесь";
+  focusArt.className = "w-72 h-72 rounded-2xl shrink-0 border border-white/10 shadow-2xl flex items-center justify-center text-6xl relative overflow-hidden player-empty-art";
+  focusArt.style.removeProperty("--cover-url");
+  focusArt.innerHTML = "<span aria-hidden=\"true\">♪</span>";
+  nowPlayingFocus.setAttribute("aria-label", "Плеер пуст — выберите трек");
+
+  currentTimeEl.textContent = "0:00";
+  totalTimeEl.textContent = "0:00";
+  focusCurrentTime.textContent = "0:00";
+  focusTotalTime.textContent = "0:00";
+  updatePlayIcon();
+  updateAllTimelines();
+  updateActiveTrackHighlight();
+  [nowPlayingFocus, playBtn, prevBtn, nextBtn, likeBtn, queueBtn, focusPlayBtn, focusPrevBtn, focusNextBtn, focusQueueBtn, focusLikeBtn]
+    .forEach((button) => button.toggleAttribute("disabled", true));
 }
 
 function showTrackNotice(message = "Аудио пока недоступно") {
@@ -393,6 +435,7 @@ function recordActiveTrackPlay() {
 // ----------------------------------------------------------------
 
 function loadTrackById(id: TrackId, autoplay = player.playing) {
+  keepPlayerEmptyUntilSelection = false;
   stopAudio();
   const track = getTrack(id);
   if (!track) return;
@@ -606,7 +649,11 @@ function applyMetadataFeed(feed: MetadataFeed) {
   loadLikedTracks();
   const currentTrack = getTrack(currentId);
   const nextCurrent = currentTrack?.id || tracks[0]?.id;
-  if (nextCurrent && currentTrack) {
+  if (keepPlayerEmptyUntilSelection) {
+    player.currentTrackId = "";
+    player.queue = [];
+    player.queueIndex = -1;
+  } else if (nextCurrent && currentTrack) {
     player.currentTrackId = nextCurrent;
     setQueueFromTracks(tracks, nextCurrent);
     syncNowPlayingUi(currentTrack);
@@ -733,6 +780,7 @@ function ensureAuthOverlay(): HTMLElement {
         ? await registerAccount(login, nickname || login, password)
         : await loginAccount(login, password);
       currentAuthUser = payload.user;
+      if (mode === "register") resetPlayerForNewAccount();
       hideAuthScreen();
       bootstrapAuthenticatedApp();
     } catch {
