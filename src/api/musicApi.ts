@@ -1,11 +1,22 @@
 import type { MetadataFeed, MetadataProviderState, Track } from "../metadataFeedService";
 
-export const API_BASE_URL = "http://5.181.21.13:8000";
-export const APP_AUTH_TOKEN = "sha256:0e7d2d2c6b6d4d83a834bbf9f6f1a012b6d1c38f0d5c9f9a67db2c7c2ad1e9c1";
-export const ADMIN_API_KEY = "admin_6b5e5f2d8c8d45d2b74573d0e2b681b0";
+export const API_BASE_URL = import.meta.env.VITE_MUSIC_API_BASE_URL?.trim() || "http://5.181.21.13:8000";
+export const APP_AUTH_TOKEN = import.meta.env.VITE_MUSIC_APP_TOKEN?.trim() || "";
+export const ADMIN_API_KEY = import.meta.env.VITE_MUSIC_ADMIN_API_KEY?.trim() || "";
 const DEVICE_ID_STORAGE_KEY = "mm_device_id";
 const AUTH_TOKEN_STORAGE_KEY = "mm_auth_token";
 const AUTH_USER_STORAGE_KEY = "mm_auth_user";
+const API_REQUEST_TIMEOUT_MS = 12000;
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
 
 export interface AuthUser {
   id: number;
@@ -96,6 +107,9 @@ export function withAppToken(url: string): string {
 }
 
 export function adminHeaders(): HeadersInit {
+  if (!ADMIN_API_KEY) {
+    throw new Error("VITE_MUSIC_ADMIN_API_KEY is required for the admin panel");
+  }
   return {
     Accept: "application/json",
     "X-App-Token": APP_AUTH_TOKEN,
@@ -104,7 +118,7 @@ export function adminHeaders(): HeadersInit {
 }
 
 async function apiFetch<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     headers: apiHeaders(),
   });
   if (!response.ok) {
@@ -157,7 +171,7 @@ function handleUnauthorizedResponse(status: number): void {
 }
 
 export async function registerAccount(login: string, nickname: string, password: string): Promise<AuthResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/register`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/register`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ login, nickname, password }),
@@ -167,7 +181,7 @@ export async function registerAccount(login: string, nickname: string, password:
 }
 
 export async function loginAccount(login: string, password: string): Promise<AuthResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/login`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ login, password }),
@@ -177,7 +191,7 @@ export async function loginAccount(login: string, password: string): Promise<Aut
 }
 
 export async function fetchCurrentUser(): Promise<AuthUser> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/me`, { headers: authHeaders() });
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/me`, { headers: authHeaders() });
   if (!response.ok) {
     handleUnauthorizedResponse(response.status);
     throw new Error(`Auth failed: ${response.status}`);
@@ -188,7 +202,7 @@ export async function fetchCurrentUser(): Promise<AuthUser> {
 }
 
 export async function updateNickname(nickname: string): Promise<AuthUser> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/me`, {
     method: "PATCH",
     headers: authHeaders(),
     body: JSON.stringify({ nickname }),
@@ -203,7 +217,7 @@ export async function updateNickname(nickname: string): Promise<AuthUser> {
 }
 
 export async function updateAvatar(avatarDataUrl: string): Promise<AuthUser> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/me/avatar`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/me/avatar`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ avatar_data_url: avatarDataUrl }),
@@ -238,7 +252,7 @@ export function getArtistTracks(artistId: string | number): Promise<BackendTrack
 }
 
 export async function recordTrackPlay(trackId: string | number): Promise<BackendTrack> {
-  const response = await fetch(`${API_BASE_URL}/api/history/listen/${encodeURIComponent(String(trackId))}`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/history/listen/${encodeURIComponent(String(trackId))}`, {
     method: "POST",
     headers: apiHeaders(),
   });
@@ -250,7 +264,7 @@ export async function recordTrackPlay(trackId: string | number): Promise<Backend
 }
 
 export async function submitBugReport(text: string): Promise<{ ok: boolean; message: string }> {
-  const response = await fetch(`${API_BASE_URL}/api/bugreport`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/bugreport`, {
     method: "POST",
     headers: {
       ...apiHeaders(),
@@ -351,7 +365,7 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
 export function mapBackendFeed(feed: BackendHomeFeed, providerState: MetadataProviderState = "backend"): MetadataFeed {
   const recent = (feed.recent || []).map((track) => mapBackendTrack(track, providerState));
   const random = (feed.random || []).map((track) => mapBackendTrack(track, providerState));
-  const trending = (feed.trending || []).map((track) => mapBackendTrack(track, providerState));
+  const trending = uniqueTracks((feed.trending || []).map((track) => mapBackendTrack(track, providerState)));
   const ru = (feed.ru || []).map((track) => mapBackendTrack(track, providerState));
   const global = (feed.global || []).map((track) => mapBackendTrack(track, providerState));
   const all = uniqueTracks([...recent, ...random, ...trending, ...ru, ...global]);

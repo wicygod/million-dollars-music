@@ -564,7 +564,8 @@ function readCachedFeed(allowStale: boolean): MetadataFeed | null {
       all: normalized,
       source,
       loadedAt: cached.loadedAt,
-      errorMessage: cached.errorMessage,
+      // Connectivity notices are transient and should never be restored from an old cache entry.
+      errorMessage: undefined,
     };
   } catch {
     return null;
@@ -595,17 +596,17 @@ export async function loadHomeFeed(): Promise<MetadataFeed> {
     if (cached) {
       return {
         ...cached,
-        errorMessage: "Backend недоступен. Проверь VPS API: http://5.181.21.13:8000",
+        errorMessage: "Не удалось обновить каталог. Показываем сохранённую музыку.",
       };
     }
     return {
       ...fallbackFeed(),
-      errorMessage: "Backend недоступен. Проверь VPS API: http://5.181.21.13:8000",
+      errorMessage: "Не удалось обновить каталог. Показываем сохранённую музыку.",
     };
   }
 
   return {
     ...fallbackFeed(),
-    errorMessage: "Backend недоступен. Проверь VPS API: http://5.181.21.13:8000",
+    errorMessage: "Не удалось обновить каталог. Показываем сохранённую музыку.",
   };
 }

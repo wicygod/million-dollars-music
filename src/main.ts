@@ -40,8 +40,8 @@ type PlayerSettings = {
 
 const DEFAULT_SETTINGS: PlayerSettings = { theme: true, scale: "100", normalize: false, crossfade: false };
 const PRIORITY_ARTISTS = ["lil peep", "9 mice", "kai angel", "viperr", "pharaoh", "темный принц", "тёмный принц", "fortuna812", "face", "cupsize", "madkid", "снялцепи"];
-const POPULAR_INITIAL_RENDER = 60;
-const POPULAR_RENDER_STEP = 40;
+const POPULAR_INITIAL_RENDER = 24;
+const POPULAR_RENDER_STEP = 24;
 let popularVisibleCount = POPULAR_INITIAL_RENDER;
 
 // Playlists, genres, stations
@@ -89,6 +89,7 @@ const radioStations = [
 
 let player = {
   playing: false,
+  buffering: false,
   currentTime: 0,
   currentTrackId: tracks[0]?.id ?? "",
   queue: [] as TrackId[],
@@ -131,8 +132,19 @@ const focusTimeline = document.getElementById("focusTimeline")!;
 const focusTimelineFill = document.getElementById("focusTimelineFill")!;
 const focusTimelineThumb = document.getElementById("focusTimelineThumb")!;
 const focusLikeBtn = document.getElementById("focusLikeBtn")!;
+const nowPlayingFocus = document.getElementById("nowPlayingFocus")! as HTMLButtonElement;
+const focusPlayBtn = document.getElementById("focusPlayBtn")! as HTMLButtonElement;
+const focusPlayIcon = document.getElementById("focusPlayIcon")!;
+const focusPrevBtn = document.getElementById("focusPrevBtn")! as HTMLButtonElement;
+const focusNextBtn = document.getElementById("focusNextBtn")! as HTMLButtonElement;
+const focusRepeatBtn = document.getElementById("focusRepeatBtn")! as HTMLButtonElement;
+const focusShuffleBtn = document.getElementById("focusShuffleBtn")! as HTMLButtonElement;
+const focusQueueBtn = document.getElementById("focusQueueBtn")! as HTMLButtonElement;
+const queueBtn = document.getElementById("queueBtn")! as HTMLButtonElement;
+const appLiveRegion = document.getElementById("appLiveRegion")!;
 
 let trackNoticeTimer: number | null = null;
+let focusReturnTarget: HTMLElement | null = null;
 
 function getOrCreateAudioElement(): HTMLAudioElement {
   const existing = document.getElementById("soundcloudAudio");
@@ -151,6 +163,7 @@ const audioEl = getOrCreateAudioElement();
 let hlsPlayer: Hls | null = null;
 let activeAudioTrackId: TrackId | null = null;
 let playbackToken = 0;
+let playbackWatchdog: number | null = null;
 let currentStreamOffset = 0;
 
 function getTrack(id: TrackId | null | undefined): Track | undefined {
@@ -217,6 +230,20 @@ function createFallbackCover(track: Track): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
+function announce(message: string) {
+  appLiveRegion.textContent = "";
+  window.setTimeout(() => { appLiveRegion.textContent = message; }, 20);
+}
+
+function syncAmbientForTrack(track: Track) {
+  const seed = `${track.gradient}|${track.artist}|${track.title}`;
+  const hash = [...seed].reduce((value, char) => ((value * 31) + char.charCodeAt(0)) >>> 0, 17);
+  const hue = hash % 360;
+  const secondaryHue = (hue + 58 + (hash % 43)) % 360;
+  document.documentElement.style.setProperty("--ambient-primary", `hsla(${hue}, 82%, 64%, 0.19)`);
+  document.documentElement.style.setProperty("--ambient-secondary", `hsla(${secondaryHue}, 88%, 62%, 0.11)`);
+}
+
 function syncNowPlayingUi(track: Track) {
   nowPlayingTitle.textContent = track.title;
   nowPlayingArtist.textContent = track.artist;
@@ -226,6 +253,8 @@ function syncNowPlayingUi(track: Track) {
   focusArtist.textContent = track.artist;
   totalTimeEl.textContent = track.durationLabel;
   focusTotalTime.textContent = track.durationLabel;
+  syncAmbientForTrack(track);
+  nowPlayingFocus.setAttribute("aria-label", `Открыть полноэкранный плеер: ${track.title} — ${track.artist}`);
   updateLikeButton();
 }
 
@@ -237,7 +266,9 @@ function showTrackNotice(message = "Аудио пока недоступно") {
     document.body.appendChild(notice);
   }
   notice.textContent = message;
+  notice.setAttribute("role", "status");
   notice.classList.add("is-visible");
+  announce(message);
   if (trackNoticeTimer !== null) window.clearTimeout(trackNoticeTimer);
   trackNoticeTimer = window.setTimeout(() => notice?.classList.remove("is-visible"), 2200);
 }
@@ -272,9 +303,39 @@ function formatTime(sec: number): string {
 }
 
 function updatePlayIcon() {
-  playIcon.innerHTML = player.playing
-    ? `<rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/>`
-    : `<path d="M8 5v14l11-7z" fill="currentColor"/>`;
+  const icon = player.buffering
+    ? `<circle class="player-loading-ring" cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="28 16"/>`
+    : player.playing
+      ? `<rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/>`
+      : `<path d="M8 5v14l11-7z" fill="currentColor"/>`;
+  playIcon.innerHTML = icon;
+  focusPlayIcon.innerHTML = icon;
+  const label = player.buffering ? "Отменить загрузку" : player.playing ? "Пауза" : "Воспроизвести";
+  playBtn.setAttribute("aria-label", label);
+  focusPlayBtn.setAttribute("aria-label", label);
+  playBtn.setAttribute("aria-busy", String(player.buffering));
+  focusPlayBtn.setAttribute("aria-busy", String(player.buffering));
+}
+
+function clearPlaybackBuffering() {
+  if (playbackWatchdog !== null) {
+    window.clearTimeout(playbackWatchdog);
+    playbackWatchdog = null;
+  }
+  player.buffering = false;
+}
+
+function beginPlaybackBuffering(token: number) {
+  clearPlaybackBuffering();
+  player.buffering = true;
+  updatePlayIcon();
+  playbackWatchdog = window.setTimeout(() => {
+    if (token !== playbackToken || !player.buffering) return;
+    stopAudio();
+    player.playing = false;
+    updatePlayIcon();
+    showTrackNotice("Сервер не ответил. Попробуйте ещё раз");
+  }, 12000);
 }
 
 function getTrackPlaybackUrl(track: Track): string | null {
@@ -350,6 +411,13 @@ function loadTrackById(id: TrackId, autoplay = player.playing) {
 function playPause() {
   const track = getTrack(player.currentTrackId);
   if (!track) return;
+  if (player.buffering) {
+    stopAudio();
+    player.playing = false;
+    updatePlayIcon();
+    announce("Загрузка отменена");
+    return;
+  }
   if (!canPlayTrack(track)) {
     player.playing = false;
     stopAudio();
@@ -375,6 +443,10 @@ function updateAllTimelines() {
     focusTimelineFill.style.width = "0%";
     focusTimelineThumb.style.left = "0%";
     focusCurrentTime.textContent = "0:00";
+    timelineContainer.setAttribute("aria-valuenow", "0");
+    timelineContainer.setAttribute("aria-valuetext", "0:00 из 0:00");
+    focusTimeline.setAttribute("aria-valuenow", "0");
+    focusTimeline.setAttribute("aria-valuetext", "0:00 из 0:00");
     return;
   }
   const duration = getCurrentDuration(track);
@@ -386,6 +458,12 @@ function updateAllTimelines() {
   focusTimelineFill.style.width = `${pct * 100}%`;
   focusTimelineThumb.style.left = `${pct * 100}%`;
   focusCurrentTime.textContent = ct;
+  const ariaPct = String(Math.round(pct * 100));
+  const ariaText = `${ct} из ${formatTime(duration)}`;
+  timelineContainer.setAttribute("aria-valuenow", ariaPct);
+  timelineContainer.setAttribute("aria-valuetext", ariaText);
+  focusTimeline.setAttribute("aria-valuenow", ariaPct);
+  focusTimeline.setAttribute("aria-valuetext", ariaText);
 }
 
 function updateActiveTrackHighlight() {
@@ -437,6 +515,11 @@ function updateLikeButton() {
   likeBtn.classList.toggle("text-white/30", !liked);
   focusLikeBtn.classList.toggle("text-red-400", liked);
   focusLikeBtn.classList.toggle("text-white/30", !liked);
+  likeBtn.setAttribute("aria-pressed", String(liked));
+  focusLikeBtn.setAttribute("aria-pressed", String(liked));
+  const label = liked ? "Убрать текущий трек из избранного" : "Добавить текущий трек в избранное";
+  likeBtn.setAttribute("aria-label", label);
+  focusLikeBtn.setAttribute("aria-label", label);
 }
 
 function toggleLike() {
@@ -471,6 +554,8 @@ function switchPage(pageId: string, extraParam: string | null = null) {
   currentPageParam = extraParam;
   currentPlaylistId = pageId === "playlist" ? extraParam : null;
   const content = document.getElementById("appContent")!;
+  document.body.dataset.page = pageId;
+  content.setAttribute("aria-busy", "true");
   content.innerHTML = "";
   content.classList.remove("hidden");
   clearSearchBtn.classList.toggle("hidden", !searchInput.value.trim());
@@ -493,14 +578,25 @@ function switchPage(pageId: string, extraParam: string | null = null) {
     case "search": renderSearchResults(content, extraParam || ""); break;
     default: renderHome(content);
   }
+  enhanceDynamicAccessibility(content);
   updateSidebarActiveState();
   updateActiveTrackHighlight();
+  content.scrollTop = 0;
+  window.requestAnimationFrame(() => content.setAttribute("aria-busy", "false"));
+  const pageLabels: Record<string, string> = {
+    home: "Главная", explore: "Обзор", favorites: "Избранное", notifications: "Уведомления",
+    radio: "Радио и миксы", profile: "Профиль", settings: "Настройки", playlist: "Плейлист",
+    genre: "Жанр", station: "Радиостанция", quick: "Подборка", artist: "Исполнитель",
+    track: "Трек", search: "Результаты поиска",
+  };
+  announce(`Открыта страница: ${pageLabels[pageId] || "Главная"}`);
 }
 
 function applyMetadataFeed(feed: MetadataFeed) {
   const currentId = player.currentTrackId;
   const previousCurrentTrack = getTrack(currentId);
   const likedIds = new Set(tracks.filter((track) => track.liked).map((track) => track.id));
+  popularVisibleCount = POPULAR_INITIAL_RENDER;
   metadataFeed = { ...feed, errorMessage: feed.errorMessage || undefined };
   tracks = feed.all.map((track) => ({ ...track, liked: likedIds.has(track.id) }));
   if (previousCurrentTrack && !tracks.some((track) => track.id === previousCurrentTrack.id)) {
@@ -567,7 +663,7 @@ function setAuthFormMode(mode: "login" | "register") {
   });
   overlay.querySelector<HTMLElement>("#authNicknameWrap")?.classList.toggle("hidden", mode !== "register");
   const submit = overlay.querySelector<HTMLButtonElement>("#authSubmitBtn");
-  if (submit) submit.textContent = mode === "register" ? "Create account" : "Sign in";
+  if (submit) submit.textContent = mode === "register" ? "Создать аккаунт" : "Войти";
 }
 
 function setAuthError(message = "") {
@@ -584,34 +680,34 @@ function ensureAuthOverlay(): HTMLElement {
   overlay.id = "authOverlay";
   overlay.className = "auth-overlay";
   overlay.innerHTML = `
-    <div class="auth-panel">
+    <div class="auth-panel" role="dialog" aria-modal="true" aria-labelledby="authTitle">
       <div class="auth-brand">
-        <div class="auth-logo">MD</div>
+        <div class="auth-logo">M</div>
         <div>
-          <p class="auth-kicker">Million Dollars Music</p>
-          <h1>Account access</h1>
+          <p class="auth-kicker">Million Music</p>
+          <h1 id="authTitle">Доступ к музыке</h1>
         </div>
       </div>
-      <p class="auth-copy">Music history and profile settings are now connected to your account.</p>
+      <p class="auth-copy">История, избранное и персональные рекомендации связаны с вашим аккаунтом.</p>
       <div class="auth-tabs">
-        <button class="auth-mode-btn is-active" data-mode="login" type="button">Sign in</button>
-        <button class="auth-mode-btn" data-mode="register" type="button">Register</button>
+        <button class="auth-mode-btn is-active" data-mode="login" type="button">Войти</button>
+        <button class="auth-mode-btn" data-mode="register" type="button">Регистрация</button>
       </div>
       <form id="authForm" class="auth-form">
         <label>
-          <span>Login</span>
+          <span>Логин</span>
           <input id="authLogin" autocomplete="username" minlength="3" maxlength="64" required />
         </label>
         <label id="authNicknameWrap" class="hidden">
-          <span>Nickname</span>
+          <span>Имя в приложении</span>
           <input id="authNickname" autocomplete="nickname" maxlength="96" />
         </label>
         <label>
-          <span>Password</span>
+          <span>Пароль</span>
           <input id="authPassword" type="password" autocomplete="current-password" minlength="6" required />
         </label>
-        <p id="authError" class="auth-error hidden"></p>
-        <button id="authSubmitBtn" type="submit">Sign in</button>
+        <p id="authError" class="auth-error hidden" role="alert"></p>
+        <button id="authSubmitBtn" type="submit">Войти</button>
       </form>
     </div>
   `;
@@ -629,7 +725,7 @@ function ensureAuthOverlay(): HTMLElement {
     setAuthError();
     if (submit) {
       submit.disabled = true;
-      submit.textContent = "Connecting...";
+      submit.textContent = "Подключаемся…";
     }
     try {
       const payload = mode === "register"
@@ -639,11 +735,11 @@ function ensureAuthOverlay(): HTMLElement {
       hideAuthScreen();
       bootstrapAuthenticatedApp();
     } catch {
-      setAuthError(mode === "register" ? "Could not create account. Check login and password." : "Could not sign in. Check login and password.");
+      setAuthError(mode === "register" ? "Не удалось создать аккаунт. Проверьте введённые данные." : "Не удалось войти. Проверьте логин и пароль.");
     } finally {
       if (submit) {
         submit.disabled = false;
-        submit.textContent = mode === "register" ? "Create account" : "Sign in";
+        submit.textContent = mode === "register" ? "Создать аккаунт" : "Войти";
       }
     }
   });
@@ -656,6 +752,10 @@ function showAuthScreen(message = "") {
   setAuthFormMode("login");
   overlay.classList.add("is-visible");
   document.body.classList.add("auth-locked");
+  document.querySelectorAll<HTMLElement>("header, aside, footer, #appContent, .mobile-nav").forEach((element) => {
+    element.inert = true;
+    element.setAttribute("aria-hidden", "true");
+  });
   setAuthError(message);
   window.setTimeout(() => overlay.querySelector<HTMLInputElement>("#authLogin")?.focus(), 50);
 }
@@ -663,6 +763,10 @@ function showAuthScreen(message = "") {
 function hideAuthScreen() {
   document.getElementById("authOverlay")?.classList.remove("is-visible");
   document.body.classList.remove("auth-locked");
+  document.querySelectorAll<HTMLElement>("header, aside, footer, #appContent, .mobile-nav").forEach((element) => {
+    element.inert = false;
+    element.removeAttribute("aria-hidden");
+  });
 }
 
 function logoutAccount() {
@@ -677,45 +781,79 @@ function bootstrapAuthenticatedApp() {
     showAuthScreen();
     return;
   }
+  const cachedUser = getStoredAuthUser();
+  const restoredFromCache = Boolean(cachedUser);
+  if (cachedUser) {
+    currentAuthUser = cachedUser;
+    hideAuthScreen();
+    switchPage(currentPage || "home", currentPageParam);
+    refreshMetadataFeed();
+  }
   fetchCurrentUser()
     .then((user) => {
       currentAuthUser = user;
       hideAuthScreen();
-      switchPage(currentPage || "home", currentPageParam);
-      refreshMetadataFeed();
+      if (!restoredFromCache) {
+        switchPage(currentPage || "home", currentPageParam);
+        refreshMetadataFeed();
+      } else if (currentPage === "profile") {
+        switchPage("profile");
+      }
     })
     .catch(() => {
-      currentAuthUser = null;
-      showAuthScreen("Session expired. Sign in again.");
+      if (!getAuthToken()) {
+        currentAuthUser = null;
+        showAuthScreen("Сессия завершилась. Войдите снова.");
+        return;
+      }
+      if (cachedUser) {
+        currentAuthUser = cachedUser;
+        hideAuthScreen();
+        showTrackNotice("Сервер временно недоступен. Используем сохранённые данные");
+        return;
+      }
+      showAuthScreen("Не удалось подключиться к серверу. Попробуйте снова.");
     });
 }
 
 function highlightHeaderButton(pageId: string) {
-  const map: Record<string, string> = { home: "hdrHome", explore: "hdrExplore", favorites: "hdrFav", notifications: "hdrNotifications", radio: "hdrRadio", profile: "hdrProfile", settings: "hdrSettings" };
+  const map: Record<string, string> = { home: "hdrHome", explore: "hdrExplore", favorites: "hdrFav", notifications: "hdrNotifications", radio: "hdrRadio", station: "hdrRadio", profile: "hdrProfile", settings: "hdrSettings" };
   const btnId = map[pageId];
   document.querySelectorAll<HTMLElement>(".hdr-btn").forEach((b) => {
     b.classList.remove("bg-white/10", "text-white");
     b.classList.add("bg-white/5", "text-white/70");
+    b.removeAttribute("aria-current");
   });
   if (btnId) {
     const btn = document.getElementById(btnId);
-    if (btn) { btn.classList.remove("bg-white/5", "text-white/70"); btn.classList.add("bg-white/10", "text-white"); }
+    if (btn) {
+      btn.classList.remove("bg-white/5", "text-white/70");
+      btn.classList.add("bg-white/10", "text-white");
+      btn.setAttribute("aria-current", "page");
+    }
   }
+  const mobileMap: Record<string, string> = { home: "mobileHome", explore: "mobileExplore", search: "mobileSearch", favorites: "mobileFavorites", profile: "mobileProfile" };
+  document.querySelectorAll<HTMLElement>(".mobile-nav button").forEach((button) => {
+    const active = button.id === mobileMap[pageId];
+    button.classList.toggle("is-active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
 }
 
 function renderTrackRow(t: Track, index: number, rowClass: string): string {
   return `
-    <div class="${rowClass} group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99]" data-id="${t.id}">
+    <div class="${rowClass} group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99]" data-id="${t.id}" role="button" tabindex="0" aria-label="Воспроизвести: ${escapeHtml(t.title)} — ${escapeHtml(t.artist)}">
       <span class="text-xs text-white/30 w-6 text-center">${index + 1}</span>
       ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
       <div class="flex-1 min-w-0">
         <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
         <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)} · ${escapeHtml(t.album)}</p>
       </div>
-      <button class="row-like-btn playlist-row-btn ${t.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${t.id}" type="button" title="Лайк">
+      <button class="row-like-btn playlist-row-btn ${t.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${t.id}" type="button" title="Лайк" aria-label="${t.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(t.title)}" aria-pressed="${String(t.liked)}">
         <svg class="w-4 h-4" fill="${t.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
       </button>
-      <button class="row-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист">
+      <button class="row-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист" aria-label="Добавить в плейлист: ${escapeHtml(t.title)}">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
       </button>
       <span class="text-xs text-white/30 tabular-nums w-12 text-right">${t.durationLabel}</span>
@@ -727,6 +865,13 @@ function wireTrackRows(container: HTMLElement, selector: string, trackList: Trac
   container.querySelectorAll<HTMLElement>(selector).forEach((el) => {
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("button")) return;
+      const id = getElementTrackId(el);
+      if (id) activateTrack(trackList, id);
+    });
+    el.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if ((event.target as HTMLElement).closest("button")) return;
+      event.preventDefault();
       const id = getElementTrackId(el);
       if (id) activateTrack(trackList, id);
     });
@@ -747,6 +892,37 @@ function wireTrackRows(container: HTMLElement, selector: string, trackList: Trac
     });
   });
   updateActiveTrackHighlight();
+}
+
+function enhanceDynamicAccessibility(container: HTMLElement) {
+  container.querySelectorAll<HTMLElement>("[data-id]").forEach((element) => {
+    if (element.matches("button, [role]")) return;
+    const track = getTrack(getElementTrackId(element));
+    element.setAttribute("role", "button");
+    element.tabIndex = 0;
+    element.setAttribute("aria-label", track ? `Воспроизвести: ${track.title} — ${track.artist}` : "Открыть трек");
+    if (element.dataset.keyboardReady === "true") return;
+    element.dataset.keyboardReady = "true";
+    element.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if ((event.target as HTMLElement).closest("button")) return;
+      event.preventDefault();
+      element.click();
+    });
+  });
+
+  container.querySelectorAll<HTMLElement>(".station-card, .quick-card, [data-playlist-card]").forEach((element) => {
+    if (element.matches("button, [role]")) return;
+    element.setAttribute("role", "button");
+    element.tabIndex = 0;
+    if (element.dataset.keyboardReady === "true") return;
+    element.dataset.keyboardReady = "true";
+    element.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      element.click();
+    });
+  });
 }
 
 // ----------------------------------------------------------------
@@ -785,8 +961,24 @@ function renderHome(container: HTMLElement) {
   popularVisibleCount = Math.max(POPULAR_INITIAL_RENDER, Math.min(popularVisibleCount, popular.length || POPULAR_INITIAL_RENDER));
   const visiblePopular = popular.slice(0, popularVisibleCount);
   const status = metadataFeed.errorMessage ? `<div class="backend-status mb-5">${escapeHtml(metadataFeed.errorMessage)}</div>` : "";
+  const heroTrack = popular[0] || recent[0] || tracks[0];
+  const hero = heroTrack ? `
+    <section class="home-hero-prism">
+      <div class="home-hero-copy">
+        <p class="home-hero-kicker">Твоя волна · прямо сейчас</p>
+        <h1>Музыка, которая остаётся с тобой</h1>
+        <p>Живые рекомендации, быстрый поиск и твоя библиотека — в одном личном пространстве без визуального шума.</p>
+        <div class="home-hero-actions">
+          <button id="homeHeroPlay" type="button">Слушать волну</button>
+          <button id="homeHeroExplore" type="button">Открыть подборки</button>
+        </div>
+      </div>
+      ${renderCover(heroTrack, "home-hero-art flex items-center justify-center text-6xl")}
+    </section>
+  ` : "";
 
   container.innerHTML = `
+    ${hero}
     ${status}
     <section class="mb-8">
       <div class="flex items-center justify-between mb-4">
@@ -825,9 +1017,10 @@ function renderHome(container: HTMLElement) {
         <span class="text-xs text-white/35">${visiblePopular.length} / ${popular.length}</span>
       </div>
       <div class="random-grid" aria-label="${popular.length} popular tracks">
-        ${visiblePopular.map((t) => `
-          <div class="random-card group cursor-pointer border border-white/10 active:scale-[0.98]" data-id="${t.id}">
+        ${visiblePopular.map((t, index) => `
+          <div class="random-card group cursor-pointer border border-white/10 active:scale-[0.98]" data-id="${t.id}" data-track-queue="popular">
             ${renderCover(t, "w-14 h-14 rounded-xl shrink-0 flex items-center justify-center text-2xl")}
+            <span class="popular-rank${index < 3 ? " is-top" : ""}" aria-hidden="true">${index + 1}</span>
             <div class="min-w-0 flex-1"><p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p><p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p></div>
             <button class="card-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
@@ -853,7 +1046,7 @@ function renderHome(container: HTMLElement) {
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("button")) return;
       const id = getElementTrackId(el);
-      if (id) activateTrack(tracks, id);
+      if (id) activateTrack(el.dataset.trackQueue === "popular" ? popular : tracks, id);
     });
   });
   container.querySelectorAll<HTMLElement>(".card-add-btn").forEach((btn) => {
@@ -872,12 +1065,16 @@ function renderHome(container: HTMLElement) {
   });
 
   container.querySelector(".seeAllHome")?.addEventListener("click", () => switchPage("explore"));
-  setupPopularLazyLoading(container, popular.length);
+  container.querySelector("#homeHeroPlay")?.addEventListener("click", () => {
+    if (heroTrack) activateTrack(popular.length ? popular : tracks, heroTrack.id);
+  });
+  container.querySelector("#homeHeroExplore")?.addEventListener("click", () => switchPage("explore"));
+  setupPopularLoadMore(container, popular.length);
 
   setTimeout(initScrollbar, 50);
 }
 
-function setupPopularLazyLoading(container: HTMLElement, totalPopular: number) {
+function setupPopularLoadMore(container: HTMLElement, totalPopular: number) {
   const loadMore = container.querySelector<HTMLButtonElement>("[data-popular-load-more]");
   if (!loadMore) return;
   const revealMore = () => {
@@ -886,15 +1083,6 @@ function setupPopularLazyLoading(container: HTMLElement, totalPopular: number) {
     renderHome(container);
   };
   loadMore.addEventListener("click", revealMore);
-  const grid = container.querySelector<HTMLElement>(".random-grid");
-  if (!grid || typeof IntersectionObserver === "undefined") return;
-  const observer = new IntersectionObserver((entries) => {
-    if (entries.some((entry) => entry.isIntersecting)) {
-      observer.disconnect();
-      revealMore();
-    }
-  }, { root: grid, threshold: 0.2 });
-  observer.observe(loadMore);
 }
 
 // ----------------------------------------------------------------
@@ -1262,15 +1450,24 @@ function renderStationPage(container: HTMLElement, stationId: string | null) {
     </div>
   `;
 
-  container.querySelectorAll<HTMLElement>(".station-track, #stationPlayBtn").forEach((el) => {
+  container.querySelectorAll<HTMLElement>(".station-track").forEach((el) => {
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("button")) return;
-      const id = el.getAttribute("data-id") || (stationTracks.length > 0 ? String(stationTracks[0].id) : null);
+      const id = el.getAttribute("data-id");
       if (id) {
         activateTrack(stationTracks, id);
       }
     });
   });
+  const stationPlayBtn = container.querySelector<HTMLButtonElement>("#stationPlayBtn");
+  if (stationPlayBtn) {
+    stationPlayBtn.disabled = stationTracks.length === 0;
+    if (stationTracks.length === 0) stationPlayBtn.textContent = "Пока нет треков";
+    stationPlayBtn.addEventListener("click", () => {
+      const first = stationTracks[0];
+      if (first) activateTrack(stationTracks, first.id);
+    });
+  }
   container.querySelectorAll<HTMLElement>(".list-add-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1298,57 +1495,57 @@ function renderProfile(container: HTMLElement) {
   container.innerHTML = `
     <div class="flex flex-col items-center py-6">
       <div class="profile-avatar w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-rose-500 flex items-center justify-center text-2xl mb-4 border-2 border-white/10 overflow-hidden">${avatarHtml}</div>
-      <h2 class="text-lg font-semibold">${escapeHtml(user?.nickname || "User")}</h2>
+      <h2 class="text-lg font-semibold">${escapeHtml(user?.nickname || "Пользователь")}</h2>
       <p class="text-xs text-white/40 mt-0.5">@${escapeHtml(user?.login || "login")}</p>
     </div>
     <div class="grid grid-cols-3 gap-3 mb-6">
       <div class="profile-stat rounded-xl bg-white/[0.03] border border-white/5 p-4 text-center">
         <p class="text-xl font-bold text-white">${listenedTracks.length}</p>
-        <p class="text-xs text-white/40 mt-1">Listened</p>
+        <p class="text-xs text-white/40 mt-1">Прослушано</p>
       </div>
       <div class="profile-stat rounded-xl bg-white/[0.03] border border-white/5 p-4 text-center">
         <p class="text-xl font-bold text-white">${likedCount}</p>
-        <p class="text-xs text-white/40 mt-1">Liked</p>
+        <p class="text-xs text-white/40 mt-1">В избранном</p>
       </div>
       <div class="profile-stat rounded-xl bg-white/[0.03] border border-white/5 p-4 text-center">
         <p class="text-xl font-bold text-white">${playlists.filter((playlist) => playlist.userCreated).length}</p>
-        <p class="text-xs text-white/40 mt-1">Playlists</p>
+        <p class="text-xs text-white/40 mt-1">Плейлисты</p>
       </div>
     </div>
     <div class="profile-account-panel mb-6">
       <form id="profileNicknameForm" class="profile-inline-form">
         <label>
-          <span>Nickname</span>
-          <input id="profileNicknameInput" value="${escapeHtml(user?.nickname || "")}" maxlength="96" />
+          <span>Имя в приложении</span>
+          <input id="profileNicknameInput" value="${escapeHtml(user?.nickname || "")}" maxlength="96" autocomplete="nickname" />
         </label>
-        <button type="submit">Save</button>
+        <button type="submit">Сохранить</button>
       </form>
       <label class="profile-upload-btn">
         <input id="profileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
-        <span>Change avatar</span>
+        <span>Изменить аватар</span>
       </label>
     </div>
-    <h3 class="text-sm font-semibold tracking-wide mb-3">Favorite artists</h3>
+    <h3 class="text-sm font-semibold tracking-wide mb-3">Любимые исполнители</h3>
     ${hasRealStats ? `
       <div class="artist-grid grid grid-cols-4 gap-3 mb-6">
         ${topArtists.map((a) => {
           const primary = listenedTracks.find((t) => t.artist === a);
-          return `<div class="artist-card text-center cursor-pointer transition-all duration-300 active:scale-95">${primary ? renderCover(primary, "artist-avatar mx-auto flex items-center justify-center", "text-sm") : ""}<p class="text-xs font-medium truncate">${escapeHtml(a)}</p><p class="text-[11px] text-white/30 truncate">Artist</p></div>`;
+          return `<div class="artist-card text-center cursor-pointer transition-all duration-300 active:scale-95" role="button" tabindex="0" aria-label="Открыть исполнителя ${escapeHtml(a)}">${primary ? renderCover(primary, "artist-avatar mx-auto flex items-center justify-center", "text-sm") : ""}<p class="text-xs font-medium truncate">${escapeHtml(a)}</p><p class="text-[11px] text-white/30 truncate">Исполнитель</p></div>`;
         }).join("")}
       </div>
     ` : `<div class="profile-empty-state mb-6">Здесь будет ваша статистика. Слушайте больше треков!</div>`}
-    <h3 class="text-sm font-semibold tracking-wide mb-3">Top tracks this month</h3>
+    <h3 class="text-sm font-semibold tracking-wide mb-3">Топ треков за месяц</h3>
     ${hasRealStats ? `
       <div class="space-y-1">
         ${topTracks.map((t, i) => `
-          <div class="profile-track flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99] group" data-id="${t.id}">
+          <div class="profile-track flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99] group" data-id="${t.id}" role="button" tabindex="0" aria-label="Воспроизвести ${escapeHtml(t.title)} — ${escapeHtml(t.artist)}">
             <span class="text-xs text-white/30 w-6 text-center font-bold">${i + 1}</span>
             ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
               <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
             </div>
-            <button class="focus-btn text-white/20 hover:text-indigo-400 transition-all duration-300 opacity-0 group-hover:opacity-100 cursor-pointer" title="Focus">
+            <button class="focus-btn text-white/20 hover:text-indigo-400 transition-all duration-300 opacity-0 group-hover:opacity-100 cursor-pointer" type="button" title="Добавить в избранное" aria-label="Добавить в избранное">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
             </button>
           </div>
@@ -1356,7 +1553,7 @@ function renderProfile(container: HTMLElement) {
       </div>
     ` : `<div class="profile-empty-state">Здесь будет ваша статистика. Слушайте больше треков!</div>`}
     <div class="profile-logout-wrap">
-      <button id="profileLogoutBtn" type="button" class="profile-logout-btn">Sign out</button>
+      <button id="profileLogoutBtn" type="button" class="profile-logout-btn">Выйти</button>
     </div>
   `;
 
@@ -1368,9 +1565,9 @@ function renderProfile(container: HTMLElement) {
     try {
       currentAuthUser = await updateNickname(nickname);
       renderProfile(container);
-      showTrackNotice("Profile updated");
+      showTrackNotice("Профиль обновлён");
     } catch {
-      showTrackNotice("Could not update profile");
+      showTrackNotice("Не удалось обновить профиль");
     }
   });
 
@@ -1382,9 +1579,9 @@ function renderProfile(container: HTMLElement) {
       try {
         currentAuthUser = await updateAvatar(String(reader.result || ""));
         renderProfile(container);
-        showTrackNotice("Avatar updated");
+        showTrackNotice("Аватар обновлён");
       } catch {
-        showTrackNotice("Could not update avatar");
+        showTrackNotice("Не удалось обновить аватар");
       }
     });
     reader.readAsDataURL(file);
@@ -1397,6 +1594,11 @@ function renderProfile(container: HTMLElement) {
     if (!artist) return;
     el.setAttribute("data-artist", artist);
     el.addEventListener("click", () => switchPage("artist", artist));
+    el.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      switchPage("artist", artist);
+    });
   });
 
   container.querySelectorAll<HTMLElement>(".profile-track").forEach((el) => {
@@ -1409,13 +1611,16 @@ function renderProfile(container: HTMLElement) {
       focusBtn.innerHTML = `<svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>`;
       focusBtn.className = `profile-like-btn playlist-row-btn ${track.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}`;
       focusBtn.setAttribute("data-track-id", String(trackId));
-      focusBtn.setAttribute("title", "Лайк");
+      focusBtn.setAttribute("title", track.liked ? "Убрать из избранного" : "Добавить в избранное");
+      focusBtn.setAttribute("aria-label", track.liked ? "Убрать из избранного" : "Добавить в избранное");
+      focusBtn.setAttribute("aria-pressed", String(track.liked));
     }
     const addBtn = document.createElement("button");
     addBtn.className = "profile-add-btn playlist-row-btn opacity-0 group-hover:opacity-100";
     addBtn.setAttribute("data-track-id", String(trackId));
     addBtn.setAttribute("type", "button");
     addBtn.setAttribute("title", "Добавить в плейлист");
+    addBtn.setAttribute("aria-label", "Добавить в плейлист");
     addBtn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>`;
     focusBtn?.after(addBtn);
   });
@@ -1423,6 +1628,13 @@ function renderProfile(container: HTMLElement) {
   container.querySelectorAll<HTMLElement>(".profile-track").forEach((el) => {
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("button")) return;
+      const id = getElementTrackId(el);
+      if (id) activateTrack(tracks, id);
+    });
+    el.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if ((event.target as HTMLElement).closest("button")) return;
+      event.preventDefault();
       const id = getElementTrackId(el);
       if (id) activateTrack(tracks, id);
     });
@@ -1509,7 +1721,7 @@ function renderTrackDetailPage(container: HTMLElement, trackId: string) {
       if (currentPage === "track" && currentPageParam === trackId) renderDetail(fresh);
     })
     .catch(() => {
-      if (currentPage === "track" && currentPageParam === trackId) renderDetail(existing, false, existing ? "" : "Backend недоступен. Проверь VPS API: http://5.181.21.13:8000");
+      if (currentPage === "track" && currentPageParam === trackId) renderDetail(existing, false, existing ? "" : "Не удалось загрузить данные трека. Попробуйте ещё раз позже.");
     });
 }
 
@@ -1561,7 +1773,7 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
           <div class="playlist-empty py-16 flex flex-col items-center justify-center text-center">
             <div class="text-4xl mb-3">♪</div>
             <h2 class="text-base font-semibold text-white/85 mb-1">Артист не найден</h2>
-            <p class="text-sm text-white/40">Backend недоступен. Проверь VPS API: http://5.181.21.13:8000</p>
+            <p class="text-sm text-white/40">Не удалось загрузить данные исполнителя. Попробуйте ещё раз позже.</p>
           </div>
         `;
       });
@@ -1604,12 +1816,63 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
   wireTrackRows(container, ".artist-track", artistTracks, () => renderArtistPage(container, artistName));
 }
 
-focusBack.addEventListener("click", () => {
+function setFocusBackgroundInert(value: boolean) {
+  document.querySelectorAll<HTMLElement>("header, aside, footer, #appContent, .mobile-nav").forEach((element) => {
+    element.inert = value;
+    if (value) element.setAttribute("aria-hidden", "true");
+    else if (!document.body.classList.contains("auth-locked")) element.removeAttribute("aria-hidden");
+  });
+}
+
+function closeFocusPlayer() {
   focusOverlay.classList.remove("active");
   focusOverlay.style.display = "none";
+  focusOverlay.setAttribute("aria-hidden", "true");
+  setFocusBackgroundInert(false);
+  focusReturnTarget?.focus();
+  focusReturnTarget = null;
+}
+
+function openFocusPlayer() {
+  focusReturnTarget = document.activeElement instanceof HTMLElement ? document.activeElement : nowPlayingFocus;
+  focusOverlay.style.display = "flex";
+  focusOverlay.setAttribute("aria-hidden", "false");
+  setFocusBackgroundInert(true);
+  window.requestAnimationFrame(() => focusOverlay.classList.add("active"));
+  window.setTimeout(() => focusBack.focus(), 40);
+}
+
+nowPlayingFocus.addEventListener("click", openFocusPlayer);
+focusBack.addEventListener("click", closeFocusPlayer);
+focusOverlay.addEventListener("click", (event) => {
+  if (event.target === focusOverlay) closeFocusPlayer();
+});
+focusOverlay.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  const focusable = [...focusOverlay.querySelectorAll<HTMLElement>("button, [role='slider'][tabindex='0']")];
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 });
 
 focusLikeBtn.addEventListener("click", toggleLike);
+focusPlayBtn.addEventListener("click", playPause);
+focusPrevBtn.addEventListener("click", () => playPrev());
+focusNextBtn.addEventListener("click", () => playNext());
+focusRepeatBtn.addEventListener("click", () => repeatBtn.click());
+focusShuffleBtn.addEventListener("click", () => shufflePlayBtn.click());
+focusQueueBtn.addEventListener("click", () => {
+  focusReturnTarget = nowPlayingFocus;
+  closeFocusPlayer();
+  window.setTimeout(showQueueSheet, 80);
+});
 
 makeDraggable(focusTimeline, focusTimelineFill, focusTimelineThumb, (pct) => {
   const track = getTrack(player.currentTrackId);
@@ -1718,12 +1981,13 @@ function countBugReportWords(text: string): number {
 
 function showBugReportModal() {
   document.querySelector(".bug-report-overlay")?.remove();
+  const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const overlay = document.createElement("div");
   overlay.className = "bug-report-overlay";
   overlay.innerHTML = `
-    <div class="bug-report-modal" role="dialog" aria-modal="true" aria-label="Сообщить о баге">
+    <div class="bug-report-modal" role="dialog" aria-modal="true" aria-labelledby="bugReportTitle">
       <button class="bug-report-close" type="button" aria-label="Закрыть">×</button>
-      <div class="bug-report-title">Сообщить о баге</div>
+      <div class="bug-report-title" id="bugReportTitle">Сообщить о баге</div>
       <p class="bug-report-hint">Опиши, что случилось: где нажал, что ожидал увидеть и какая ошибка появилась.</p>
       <textarea class="bug-report-text" maxlength="5000" placeholder="Например: не отправляется баг-репорт из настроек..."></textarea>
       <div class="bug-report-footer">
@@ -1740,7 +2004,30 @@ function showBugReportModal() {
   const sendBtn = overlay.querySelector<HTMLButtonElement>(".bug-report-send")!;
   const countEl = overlay.querySelector<HTMLElement>(".bug-report-count")!;
 
-  const close = () => overlay.remove();
+  const close = () => {
+    document.removeEventListener("keydown", onKeyDown);
+    overlay.remove();
+    previouslyFocused?.focus();
+  };
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...modal.querySelectorAll<HTMLElement>("button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex='-1'])")];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
   const syncState = () => {
     const words = countBugReportWords(textarea.value);
     const valid = words > 0 && words <= 130;
@@ -1754,6 +2041,7 @@ function showBugReportModal() {
     if (event.target === overlay) close();
   });
   modal.addEventListener("click", (event) => event.stopPropagation());
+  document.addEventListener("keydown", onKeyDown);
   textarea.addEventListener("input", syncState);
   sendBtn.addEventListener("click", async () => {
     const text = textarea.value.trim();
@@ -1793,8 +2081,8 @@ function renderPlaylistPage(container: HTMLElement, playlistId: string | null) {
           <div class="w-20 h-20 rounded-2xl bg-white/10 flex items-center justify-center text-3xl border border-white/10">${pl.icon}</div>
           <div>
             <p class="text-xs uppercase tracking-widest text-white/50 mb-1">Плейлист</p>
-            <h2 class="text-2xl font-bold">${pl.name}</h2>
-            <p class="text-sm text-white/60 mt-1">${pl.description}</p>
+            <h2 class="text-2xl font-bold">${escapeHtml(pl.name)}</h2>
+            <p class="text-sm text-white/60 mt-1">${escapeHtml(pl.description)}</p>
             <p class="text-xs text-white/40 mt-1">${plTracks.length} треков · ${formatTime(totalDuration)}</p>
           </div>
         </div>
@@ -2046,10 +2334,10 @@ function renderSearchResults(container: HTMLElement, query: string) {
               <p class="text-sm font-medium truncate">${highlightMatch(t.title, q)}</p>
               <p class="text-xs text-white/40 truncate">${highlightMatch(t.artist, q)}</p>
             </div>
-            <button class="search-like-btn playlist-row-btn ${t.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${t.id}" type="button" title="Лайк">
+            <button class="search-like-btn playlist-row-btn ${t.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${t.id}" type="button" title="Лайк" aria-label="${t.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(t.title)}" aria-pressed="${String(t.liked)}">
               <svg class="w-4 h-4" fill="${t.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
             </button>
-            <button class="search-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист">
+            <button class="search-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист" aria-label="Добавить в плейлист: ${escapeHtml(t.title)}">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
             </button>
             <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
@@ -2078,6 +2366,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
         if (trackId) showPlaylistPopup(btn, trackId);
       });
     });
+    enhanceDynamicAccessibility(container);
     updateActiveTrackHighlight();
   };
   const mapSearchResults = (backendTracks: Awaited<ReturnType<typeof searchCatalog>>) =>
@@ -2110,14 +2399,23 @@ function renderSearchResults(container: HTMLElement, query: string) {
       </div>
     </div>
   `;
+  const showSavedSearchResults = () => {
+    if (!isCurrentSearch()) return;
+    renderBackendResults(localResults(), "Каталог временно недоступен. Показаны сохранённые результаты.");
+  };
+  const searchFallbackTimer = window.setTimeout(showSavedSearchResults, 8000);
   searchCatalog(query, searchTargetLimit)
     .then((backendTracks) => {
+      window.clearTimeout(searchFallbackTimer);
       if (!isCurrentSearch()) return;
       const items = mapSearchResults(backendTracks);
       renderBackendResults(items);
       pollHydratedResults(1, items.length);
     })
-    .catch(() => renderBackendResults(localResults(), "Backend недоступен. Проверь VPS API: http://5.181.21.13:8000"));
+    .catch(() => {
+      window.clearTimeout(searchFallbackTimer);
+      showSavedSearchResults();
+    });
   return;
   const results = tracks.filter((t) => t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q) || t.genre.includes(q) || t.tags.some((tag) => tag.toLowerCase().includes(q)));
 
@@ -2196,6 +2494,70 @@ function setQueueFromTracks(trackList: Track[], startId: TrackId) {
   player.queue = trackList.map((t) => t.id);
   player.queueIndex = trackList.findIndex((t) => t.id === startId);
 }
+
+function showQueueSheet() {
+  const existing = document.querySelector<HTMLElement>(".queue-overlay");
+  if (existing) {
+    existing.querySelector<HTMLButtonElement>(".queue-close")?.click();
+    return;
+  }
+  if (player.queue.length === 0) setQueueFromTracks(tracks, player.currentTrackId);
+  const queuedTracks = player.queue.map((id) => getTrack(id)).filter((track): track is Track => Boolean(track));
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : queueBtn;
+  const overlay = document.createElement("div");
+  overlay.className = "queue-overlay";
+  overlay.innerHTML = `
+    <aside class="queue-sheet" role="dialog" aria-modal="true" aria-labelledby="queueTitle">
+      <div class="queue-header">
+        <div><p class="section-kicker">Далее прозвучит</p><h2 id="queueTitle">Очередь</h2></div>
+        <button class="queue-close" type="button" aria-label="Закрыть очередь">×</button>
+      </div>
+      <div class="queue-list">
+        ${queuedTracks.length ? queuedTracks.map((track) => `
+          <button class="queue-item ${track.id === player.currentTrackId ? "is-current" : ""}" type="button" data-queue-id="${escapeHtml(String(track.id))}" ${track.id === player.currentTrackId ? 'aria-current="true"' : ""}>
+            ${renderCover(track, "queue-item-cover w-10 h-10 rounded-xl flex items-center justify-center text-xs")}
+            <span class="queue-item-copy"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}</span></span>
+            <span class="queue-item-time tabular-nums">${track.durationLabel}</span>
+          </button>
+        `).join("") : `<div class="playlist-empty"><strong>Очередь пуста</strong><span>Запустите трек из любой подборки</span></div>`}
+      </div>
+    </aside>
+  `;
+  document.body.appendChild(overlay);
+  queueBtn.setAttribute("aria-expanded", "true");
+  const sheet = overlay.querySelector<HTMLElement>(".queue-sheet")!;
+  const closeButton = overlay.querySelector<HTMLButtonElement>(".queue-close")!;
+
+  function closeQueue() {
+    document.removeEventListener("keydown", onKeyDown, true);
+    overlay.remove();
+    queueBtn.setAttribute("aria-expanded", "false");
+    previousFocus.focus();
+  }
+  function onKeyDown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      closeQueue();
+    }
+  }
+
+  closeButton.addEventListener("click", closeQueue);
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) closeQueue(); });
+  sheet.addEventListener("click", (event) => event.stopPropagation());
+  overlay.querySelectorAll<HTMLButtonElement>("[data-queue-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = normalizeTrackId(button.dataset.queueId);
+      if (id) loadTrackById(id, true);
+      closeQueue();
+    });
+  });
+  document.addEventListener("keydown", onKeyDown, true);
+  window.setTimeout(() => closeButton.focus(), 40);
+}
+
+queueBtn.addEventListener("click", showQueueSheet);
 
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
@@ -2419,34 +2781,55 @@ function showPlaylistPopup(anchor: HTMLElement, trackId: TrackId, onChange?: (pl
   const existing = document.querySelector(".pl-popup")!;
   if (existing) { existing.remove(); return; }
 
-  const rect = anchor.closest("button")!.getBoundingClientRect();
+  const anchorButton = anchor.closest<HTMLElement>("button") || anchor;
+  const rect = anchorButton.getBoundingClientRect();
   const popup = document.createElement("div");
   popup.className = "pl-popup";
+  popup.setAttribute("role", "dialog");
+  popup.setAttribute("aria-label", "Добавить в плейлист");
   popup.style.visibility = "hidden";
   popup.innerHTML = `
     <div class="pl-popup-title">Добавить в плейлист</div>
     <div class="pl-popup-list"></div>
     <button class="pl-popup-create" type="button">+ Создать плейлист</button>
     <form class="pl-popup-form hidden">
-      <input class="pl-popup-input" type="text" maxlength="40" placeholder="Название плейлиста" />
+      <label class="sr-only" for="popupPlaylistName">Название плейлиста</label>
+      <input id="popupPlaylistName" class="pl-popup-input" type="text" maxlength="40" autocomplete="off" placeholder="Название плейлиста" />
       <div class="pl-popup-form-actions">
         <button class="pl-popup-save" type="submit">Создать</button>
         <button class="pl-popup-cancel" type="button">Отмена</button>
       </div>
-      <p class="pl-popup-error hidden"></p>
+      <p class="pl-popup-error hidden" role="alert"></p>
     </form>
   `;
+  function closePopup(restoreFocus = true) {
+    document.removeEventListener("click", onDocumentClick);
+    document.removeEventListener("keydown", onPopupKeyDown);
+    popup.remove();
+    if (restoreFocus) anchorButton.focus();
+  }
+  function onDocumentClick(event: MouseEvent) {
+    if (!popup.contains(event.target as Node)) closePopup(false);
+  }
+  function onPopupKeyDown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePopup();
+    }
+  }
   const listEl = popup.querySelector(".pl-popup-list")!;
   playlists.forEach((pl) => {
     const assigned = isTrackInPlaylist(trackId, pl.id);
-    const item = document.createElement("div");
+    const item = document.createElement("button");
+    item.type = "button";
     item.className = `pl-popup-item ${assigned ? "is-assigned" : ""}`;
+    item.setAttribute("aria-label", `${assigned ? "Уже добавлено: " : "Добавить в "}${pl.name}`);
     item.innerHTML = `<span class="pl-popup-icon">${pl.icon}</span><span class="pl-popup-name">${escapeHtml(pl.name)}</span><span class="pl-popup-state">${assigned ? "✓" : ""}</span>`;
     item.addEventListener("click", () => {
       addTrackToPlaylist(trackId, pl.id);
       renderSidebarPlaylists();
       if (currentPage === "playlist") switchPage("playlist", currentPlaylistId);
-      popup.remove();
+      closePopup(false);
       onChange?.(pl.id);
     });
     listEl.appendChild(item);
@@ -2485,7 +2868,7 @@ function showPlaylistPopup(anchor: HTMLElement, trackId: TrackId, onChange?: (pl
     if (!playlist) { setPopupError("Не удалось создать плейлист"); return; }
     addTrackToPlaylist(trackId, playlist.id);
     renderSidebarPlaylists();
-    popup.remove();
+    closePopup(false);
     switchPage("playlist", playlist.id);
     onChange?.(playlist.id);
   });
@@ -2507,6 +2890,7 @@ function showPlaylistPopup(anchor: HTMLElement, trackId: TrackId, onChange?: (pl
   popup.style.left = `${left}px`;
   popup.style.top = `${top}px`;
   popup.style.visibility = "visible";
+  document.addEventListener("keydown", onPopupKeyDown);
 
   const clampPopupPosition = () => {
     const settledRect = popup.getBoundingClientRect();
@@ -2523,8 +2907,8 @@ function showPlaylistPopup(anchor: HTMLElement, trackId: TrackId, onChange?: (pl
 
   clampPopupPosition();
   requestAnimationFrame(clampPopupPosition);
-  const close = (ev: MouseEvent) => { if (!popup.contains(ev.target as Node)) { popup.remove(); document.removeEventListener("click", close); } };
-  setTimeout(() => document.addEventListener("click", close), 10);
+  setTimeout(() => document.addEventListener("click", onDocumentClick), 10);
+  window.setTimeout(() => (listEl.querySelector("button") as HTMLButtonElement | null)?.focus(), 20);
 }
 
 function getPlaylistTracks(pl: PlaylistDef): Track[] {
@@ -2575,6 +2959,10 @@ function updateVolumeUi() {
   volumeBtn.classList.toggle("text-white/80", muted);
   volumeBtn.classList.toggle("text-white/40", !muted);
   volumeBtn.setAttribute("aria-pressed", String(muted));
+  volumeBtn.setAttribute("aria-label", muted ? "Включить звук" : "Отключить звук");
+  const percent = Math.round(visibleVolume * 100);
+  volumeContainer.setAttribute("aria-valuenow", String(percent));
+  volumeContainer.setAttribute("aria-valuetext", `${percent} процентов`);
 }
 
 function playLoadedAudio(token: number) {
@@ -2582,11 +2970,16 @@ function playLoadedAudio(token: number) {
   applyVolume();
   audioEl.play()
     .then(() => {
+      if (token !== playbackToken) return;
+      clearPlaybackBuffering();
+      player.playing = true;
+      updatePlayIcon();
       if (token === playbackToken) recordActiveTrackPlay();
       if (token === playbackToken && getPlayerSettings().crossfade) fadePlaybackGain(1, 900);
     })
     .catch(() => {
     if (token !== playbackToken) return;
+    clearPlaybackBuffering();
     player.playing = false;
     updatePlayIcon();
     showTrackNotice("Не удалось запустить аудиопоток");
@@ -2617,6 +3010,8 @@ function startAudio(track: Track) {
   if (!sourceUrl) return;
 
   if (activeAudioTrackId === track.id && (audioEl.src || hlsPlayer)) {
+    player.playing = true;
+    beginPlaybackBuffering(playbackToken);
     playLoadedAudio(playbackToken);
     return;
   }
@@ -2624,6 +3019,8 @@ function startAudio(track: Track) {
   stopAudio();
   const token = ++playbackToken;
   activeAudioTrackId = track.id;
+  player.playing = true;
+  beginPlaybackBuffering(token);
   crossfadeArmedFor = null;
   playbackGain = getPlayerSettings().crossfade ? 0 : 1;
   window.setTimeout(() => {
@@ -2649,6 +3046,7 @@ function startAudio(track: Track) {
 
 function stopAudio() {
   playbackToken++;
+  clearPlaybackBuffering();
   if (fadeTimer !== null) {
     window.clearInterval(fadeTimer);
     fadeTimer = null;
@@ -2699,8 +3097,23 @@ audioEl.addEventListener("play", () => {
 
 audioEl.addEventListener("playing", recordActiveTrackPlay);
 
+audioEl.addEventListener("playing", () => {
+  clearPlaybackBuffering();
+  player.playing = true;
+  updatePlayIcon();
+});
+
+audioEl.addEventListener("waiting", () => {
+  if (player.playing && activeAudioTrackId) beginPlaybackBuffering(playbackToken);
+});
+
+audioEl.addEventListener("stalled", () => {
+  if (player.playing && activeAudioTrackId) beginPlaybackBuffering(playbackToken);
+});
+
 audioEl.addEventListener("pause", () => {
   if (audioEl.ended) return;
+  clearPlaybackBuffering();
   player.playing = false;
   updatePlayIcon();
 });
@@ -2741,6 +3154,7 @@ audioEl.addEventListener("durationchange", () => {
 });
 
 audioEl.addEventListener("ended", () => {
+  clearPlaybackBuffering();
   const track = getTrack(player.currentTrackId);
   if (player.repeat && track) {
     audioEl.currentTime = 0;
@@ -2756,6 +3170,7 @@ audioEl.addEventListener("ended", () => {
 });
 
 audioEl.addEventListener("error", () => {
+  clearPlaybackBuffering();
   if (!player.playing) return;
   player.playing = false;
   updatePlayIcon();
@@ -2775,12 +3190,26 @@ audioEl.addEventListener("error", () => {
   });
 });
 
+const mobileNavigation: Record<string, string> = {
+  mobileHome: "home",
+  mobileExplore: "explore",
+  mobileFavorites: "favorites",
+  mobileProfile: "profile",
+};
+Object.entries(mobileNavigation).forEach(([id, page]) => {
+  document.getElementById(id)?.addEventListener("click", () => switchPage(page));
+});
+document.getElementById("mobileSearch")?.addEventListener("click", () => {
+  searchInput.focus();
+  searchInput.select();
+});
+
 // ----------------------------------------------------------------
 function renderSidebarPlaylists() {
   const container = document.getElementById("sidebarPlaylistContainer");
   if (!container) return;
   container.innerHTML = playlists.map((pl) => `
-    <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="${pl.id}">
+    <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="${pl.id}" role="button" tabindex="0" aria-label="Открыть плейлист ${escapeHtml(pl.name)}" title="${escapeHtml(pl.name)}">
       <span class="pl-icon">${pl.icon}</span><span class="truncate">${escapeHtml(pl.name)}</span>
     </div>
   `).join("");
@@ -2789,6 +3218,11 @@ function renderSidebarPlaylists() {
     el.addEventListener("click", () => {
       const plId = el.getAttribute("data-playlist");
       if (plId) switchPage("playlist", plId);
+    });
+    el.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      el.click();
     });
     el.draggable = true;
     el.addEventListener("dragstart", (e) => {
@@ -2835,12 +3269,14 @@ function setPlaylistFormError(message = "") {
 
 createPlaylistBtn.addEventListener("click", () => {
   createPlaylistForm.classList.toggle("hidden");
+  createPlaylistBtn.setAttribute("aria-expanded", String(!createPlaylistForm.classList.contains("hidden")));
   setPlaylistFormError();
   if (!createPlaylistForm.classList.contains("hidden")) newPlaylistName.focus();
 });
 
 cancelPlaylistBtn.addEventListener("click", () => {
   createPlaylistForm.classList.add("hidden");
+  createPlaylistBtn.setAttribute("aria-expanded", "false");
   newPlaylistName.value = "";
   setPlaylistFormError();
 });
@@ -2857,6 +3293,7 @@ createPlaylistForm.addEventListener("submit", (e) => {
   if (!playlist) { setPlaylistFormError("Не удалось создать плейлист"); return; }
   newPlaylistName.value = "";
   createPlaylistForm.classList.add("hidden");
+  createPlaylistBtn.setAttribute("aria-expanded", "false");
   setPlaylistFormError();
   renderSidebarPlaylists();
   switchPage("playlist", playlist.id);
@@ -2867,6 +3304,11 @@ document.getElementById("likedTracks")?.addEventListener("click", () => {
   renderFavorites();
   switchPage("favorites");
 });
+document.getElementById("likedTracks")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  (event.currentTarget as HTMLElement).click();
+});
 
 // Плеер
 playBtn.addEventListener("click", playPause);
@@ -2876,49 +3318,25 @@ likeBtn.addEventListener("click", toggleLike);
 
 const addToPlaylistBtn = document.getElementById("addToPlaylistBtn")!;
 addToPlaylistBtn.addEventListener("click", (e) => {
-  showPlaylistPopup(e.target as HTMLElement, player.currentTrackId);
-  return;
-  const existing = document.querySelector(".pl-popup")!;
-  if (existing) { existing.remove(); return; }
-  const rect = (e.target as HTMLElement).closest("button")!.getBoundingClientRect();
-  const popup = document.createElement("div");
-  popup.className = "pl-popup";
-  popup.innerHTML = `<div class="text-xs text-white/40 px-3 py-1.5 font-medium">Добавить в плейлист</div>`;
-  playlists.forEach((pl) => {
-    const assigned = playlistTrackAssign[pl.id]?.includes(player.currentTrackId);
-    const item = document.createElement("div");
-    item.className = "pl-popup-item";
-    item.innerHTML = `${pl.icon} ${pl.name} ${assigned ? '<span class="ml-auto text-indigo-400 text-xs">✓</span>' : ""}`;
-    item.addEventListener("click", () => {
-      addTrackToPlaylist(player.currentTrackId, pl.id);
-      popup.remove();
-      if (currentPage === "playlist") switchPage("playlist", pl.id);
-    });
-    popup.appendChild(item);
-  });
-  document.body.appendChild(popup);
-  const popupRect = popup.getBoundingClientRect();
-  const gap = 6;
-  const left = Math.min(Math.max(gap, rect.left), window.innerWidth - popupRect.width - gap);
-  const topBelow = rect.bottom + gap;
-  const topAbove = rect.top - popupRect.height - gap;
-  const top = topBelow + popupRect.height <= window.innerHeight - gap ? topBelow : Math.max(gap, topAbove);
-  popup.style.left = `${left}px`;
-  popup.style.top = `${top}px`;
-  const close = (ev: MouseEvent) => { if (!popup.contains(ev.target as Node)) { popup.remove(); document.removeEventListener("click", close); } };
-  setTimeout(() => document.addEventListener("click", close), 10);
+  showPlaylistPopup(e.currentTarget as HTMLElement, player.currentTrackId);
 });
 
 repeatBtn.addEventListener("click", function () {
   player.repeat = !player.repeat;
   this.classList.toggle("text-indigo-400", player.repeat);
   this.classList.toggle("text-white/40", !player.repeat);
+  this.setAttribute("aria-pressed", String(player.repeat));
+  focusRepeatBtn.setAttribute("aria-pressed", String(player.repeat));
+  announce(player.repeat ? "Повтор включён" : "Повтор выключен");
 });
 
 shufflePlayBtn.addEventListener("click", function () {
   player.shuffle = !player.shuffle;
   this.classList.toggle("text-indigo-400", player.shuffle);
   this.classList.toggle("text-white/40", !player.shuffle);
+  this.setAttribute("aria-pressed", String(player.shuffle));
+  focusShuffleBtn.setAttribute("aria-pressed", String(player.shuffle));
+  announce(player.shuffle ? "Перемешивание включено" : "Перемешивание выключено");
 });
 
 volumeBtn.addEventListener("click", function () {
@@ -2936,18 +3354,45 @@ volumeBtn.addEventListener("click", function () {
 function makeDraggable(container: HTMLElement, fill: HTMLElement, thumb: HTMLElement, onDrag: (pct: number) => void) {
   const update = (clientX: number) => {
     const rect = container.getBoundingClientRect();
+    if (rect.width <= 0) return;
     let pct = (clientX - rect.left) / rect.width;
     pct = Math.max(0, Math.min(1, pct));
     fill.style.width = `${pct * 100}%`;
     thumb.style.left = `${pct * 100}%`;
     onDrag(pct);
   };
-  container.addEventListener("mousedown", (e) => {
-    update(e.clientX);
-    const onMove = (ev: MouseEvent) => update(ev.clientX);
-    const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+  container.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    container.focus();
+    container.setPointerCapture(event.pointerId);
+    update(event.clientX);
+  });
+  container.addEventListener("pointermove", (event) => {
+    if (!container.hasPointerCapture(event.pointerId)) return;
+    update(event.clientX);
+  });
+  container.addEventListener("pointerup", (event) => {
+    if (container.hasPointerCapture(event.pointerId)) container.releasePointerCapture(event.pointerId);
+  });
+  container.addEventListener("pointercancel", (event) => {
+    if (container.hasPointerCapture(event.pointerId)) container.releasePointerCapture(event.pointerId);
+  });
+  container.addEventListener("keydown", (event) => {
+    const current = Math.max(0, Math.min(1, Number(container.getAttribute("aria-valuenow") || 0) / 100));
+    let next = current;
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") next -= 0.02;
+    else if (event.key === "ArrowRight" || event.key === "ArrowUp") next += 0.02;
+    else if (event.key === "PageDown") next -= 0.1;
+    else if (event.key === "PageUp") next += 0.1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = 1;
+    else return;
+    event.preventDefault();
+    next = Math.max(0, Math.min(1, next));
+    fill.style.width = `${next * 100}%`;
+    thumb.style.left = `${next * 100}%`;
+    onDrag(next);
   });
 }
 
@@ -3034,10 +3479,23 @@ clearSearchBtn.addEventListener("click", () => { searchInput.value = ""; clearSe
 // ----------------------------------------------------------------
 
 document.addEventListener("keydown", (e) => {
-  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    searchInput.focus();
+    searchInput.select();
+    return;
+  }
+  if (e.key === "Escape" && focusOverlay.classList.contains("active")) {
+    e.preventDefault();
+    closeFocusPlayer();
+    return;
+  }
+  const target = e.target instanceof HTMLElement ? e.target : null;
+  if (target?.closest("input, textarea, select, button, a, [contenteditable='true'], [role='slider'], [role='dialog'], [role='button']")) return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
   if (e.code === "Space") { e.preventDefault(); playPause(); }
-  if (e.code === "ArrowRight") playNext();
-  if (e.code === "ArrowLeft") playPrev();
+  if (e.code === "ArrowRight") { e.preventDefault(); playNext(); }
+  if (e.code === "ArrowLeft") { e.preventDefault(); playPrev(); }
 });
 
 // ----------------------------------------------------------------
@@ -3059,7 +3517,7 @@ updateVolumeUi();
 if (tracks[0]) loadTrackById(tracks[0].id, false);
 window.addEventListener("auth:required", () => {
   currentAuthUser = null;
-  showAuthScreen("Sign in is required.");
+  showAuthScreen("Для продолжения войдите в аккаунт.");
 });
 if (getAuthToken()) {
   switchPage("home");
