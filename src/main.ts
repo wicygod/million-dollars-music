@@ -364,7 +364,7 @@ function pushRecentTrack(track: Track) {
     recent: [track, ...metadataFeed.recent.filter((item) => item.id !== track.id)].slice(0, 36),
     all: metadataFeed.all.some((item) => item.id === track.id) ? metadataFeed.all : [track, ...metadataFeed.all],
   };
-  if (currentPage === "home") switchPage("home");
+  if (currentPage === "home") switchPage("home", null, true);
 }
 
 function recordActiveTrackPlay() {
@@ -549,11 +549,12 @@ let currentPageParam: string | null = null;
 let currentPlaylistId: string | null = null;
 let searchRequestToken = 0;
 
-function switchPage(pageId: string, extraParam: string | null = null) {
+function switchPage(pageId: string, extraParam: string | null = null, preserveScroll = false) {
+  const content = document.getElementById("appContent")!;
+  const previousScrollTop = content.scrollTop;
   currentPage = pageId;
   currentPageParam = extraParam;
   currentPlaylistId = pageId === "playlist" ? extraParam : null;
-  const content = document.getElementById("appContent")!;
   document.body.dataset.page = pageId;
   content.setAttribute("aria-busy", "true");
   content.innerHTML = "";
@@ -581,7 +582,7 @@ function switchPage(pageId: string, extraParam: string | null = null) {
   enhanceDynamicAccessibility(content);
   updateSidebarActiveState();
   updateActiveTrackHighlight();
-  content.scrollTop = 0;
+  content.scrollTop = preserveScroll ? previousScrollTop : 0;
   window.requestAnimationFrame(() => content.setAttribute("aria-busy", "false"));
   const pageLabels: Record<string, string> = {
     home: "Главная", explore: "Обзор", favorites: "Избранное", notifications: "Уведомления",
@@ -589,7 +590,7 @@ function switchPage(pageId: string, extraParam: string | null = null) {
     genre: "Жанр", station: "Радиостанция", quick: "Подборка", artist: "Исполнитель",
     track: "Трек", search: "Результаты поиска",
   };
-  announce(`Открыта страница: ${pageLabels[pageId] || "Главная"}`);
+  if (!preserveScroll) announce(`Открыта страница: ${pageLabels[pageId] || "Главная"}`);
 }
 
 function applyMetadataFeed(feed: MetadataFeed) {
@@ -616,7 +617,7 @@ function applyMetadataFeed(feed: MetadataFeed) {
     setQueueFromTracks(tracks, nextCurrent);
     loadTrackById(nextCurrent, false);
   }
-  switchPage(currentPage, currentPageParam);
+  switchPage(currentPage, currentPageParam, true);
 }
 
 function refreshMetadataFeed(attempt = 1) {
