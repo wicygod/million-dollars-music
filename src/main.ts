@@ -197,7 +197,7 @@ function getElementTrackId(el: Element, attr = "data-id"): TrackId | null {
 }
 
 function coverStyle(track: Track): string {
-  return ` style="--cover-url: url('${escapeHtml(getTrackCoverUrl(track))}')"`;
+  return ` style="--cover-url: url('${escapeHtml(getTrackCoverUrl(track))}'); --cover-fallback-url: url('${escapeHtml(createFallbackCover(track))}')"`;
 }
 
 function renderCover(track: Track, className: string, iconClass = "", innerHtml = ""): string {
@@ -208,6 +208,7 @@ function renderCover(track: Track, className: string, iconClass = "", innerHtml 
 function applyCoverToElement(el: HTMLElement, track: Track, className: string) {
   el.className = `${className} track-cover has-cover bg-gradient-to-br ${track.gradient}`;
   el.style.setProperty("--cover-url", `url("${getTrackCoverUrl(track)}")`);
+  el.style.setProperty("--cover-fallback-url", `url("${createFallbackCover(track)}")`);
   el.innerHTML = `<span class="now-playing-glow absolute inset-0 rounded-xl"></span><span class="track-cover-icon">${track.icon}</span>`;
 }
 
@@ -1924,6 +1925,8 @@ focusQueueBtn.addEventListener("click", () => {
 });
 
 makeDraggable(focusTimeline, focusTimelineFill, focusTimelineThumb, (pct) => {
+  previewActiveTrackPosition(pct);
+}, (pct) => {
   const track = getTrack(player.currentTrackId);
   if (!track) return;
   seekActiveTrack(pct * getCurrentDuration(track));
@@ -3043,11 +3046,11 @@ function withPlaybackStart(sourceUrl: string, startSeconds: number): string {
   return url.toString();
 }
 
-function attachNativeAudio(sourceUrl: string, token: number, startSeconds = 0) {
+function attachNativeAudio(sourceUrl: string, token: number, startSeconds = 0, autoplay = true) {
   currentStreamOffset = Math.max(0, startSeconds);
   audioEl.src = withPlaybackStart(sourceUrl, currentStreamOffset);
   audioEl.load();
-  playLoadedAudio(token);
+  if (autoplay) playLoadedAudio(token);
 }
 
 function isHlsPlaybackUrl(sourceUrl: string) {
@@ -3133,9 +3136,18 @@ function seekActiveTrack(seconds: number) {
   const token = ++playbackToken;
   currentStreamOffset = target;
   audioEl.pause();
-  audioEl.src = withPlaybackStart(sourceUrl, target);
-  audioEl.load();
-  if (shouldResume) playLoadedAudio(token);
+  player.playing = shouldResume;
+  if (shouldResume) beginPlaybackBuffering(token);
+  attachNativeAudio(sourceUrl, token, target, shouldResume);
+  if (!shouldResume) updatePlayIcon();
+}
+
+function previewActiveTrackPosition(pct: number) {
+  const track = getTrack(player.currentTrackId);
+  if (!track) return;
+  const duration = getCurrentDuration(track);
+  player.currentTime = Math.round(Math.max(0, Math.min(duration, pct * duration)));
+  updateAllTimelines();
 }
 
 audioEl.addEventListener("play", () => {
@@ -3400,7 +3412,14 @@ volumeBtn.addEventListener("click", function () {
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
-function makeDraggable(container: HTMLElement, fill: HTMLElement, thumb: HTMLElement, onDrag: (pct: number) => void) {
+function makeDraggable(
+  container: HTMLElement,
+  fill: HTMLElement,
+  thumb: HTMLElement,
+  onDrag: (pct: number) => void,
+  onCommit?: (pct: number) => void,
+) {
+  let pendingPct: number | null = null;
   const update = (clientX: number) => {
     const rect = container.getBoundingClientRect();
     if (rect.width <= 0) return;
@@ -3408,6 +3427,7 @@ function makeDraggable(container: HTMLElement, fill: HTMLElement, thumb: HTMLEle
     pct = Math.max(0, Math.min(1, pct));
     fill.style.width = `${pct * 100}%`;
     thumb.style.left = `${pct * 100}%`;
+    pendingPct = pct;
     onDrag(pct);
   };
   container.addEventListener("pointerdown", (event) => {
@@ -3423,9 +3443,12 @@ function makeDraggable(container: HTMLElement, fill: HTMLElement, thumb: HTMLEle
   });
   container.addEventListener("pointerup", (event) => {
     if (container.hasPointerCapture(event.pointerId)) container.releasePointerCapture(event.pointerId);
+    if (pendingPct !== null) onCommit?.(pendingPct);
+    pendingPct = null;
   });
   container.addEventListener("pointercancel", (event) => {
     if (container.hasPointerCapture(event.pointerId)) container.releasePointerCapture(event.pointerId);
+    pendingPct = null;
   });
   container.addEventListener("keydown", (event) => {
     const current = Math.max(0, Math.min(1, Number(container.getAttribute("aria-valuenow") || 0) / 100));
@@ -3442,10 +3465,13 @@ function makeDraggable(container: HTMLElement, fill: HTMLElement, thumb: HTMLEle
     fill.style.width = `${next * 100}%`;
     thumb.style.left = `${next * 100}%`;
     onDrag(next);
+    onCommit?.(next);
   });
 }
 
 makeDraggable(timelineContainer, timelineFill, timelineThumb, (pct) => {
+  previewActiveTrackPosition(pct);
+}, (pct) => {
   const track = getTrack(player.currentTrackId);
   if (track) {
     seekActiveTrack(pct * getCurrentDuration(track));

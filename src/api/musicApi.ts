@@ -310,6 +310,7 @@ function gradientForGenre(genre: string): string {
 
 function resolveBackendUrl(value: string | null | undefined): string | null {
   if (!value) return null;
+  if (value.startsWith("/static/covers/demo-")) return null;
   if (/^https?:\/\//i.test(value) || value.startsWith("data:")) return value;
   if (value.startsWith("/api/images/proxy")) return withAppToken(`${API_BASE_URL}${value}`);
   if (value.startsWith("/")) return `${API_BASE_URL}${value}`;

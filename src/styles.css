@@ -560,7 +560,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .track-cover.has-cover {
-  background-image: linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.24)), var(--cover-url) !important;
+  background-image: linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.24)), var(--cover-url), var(--cover-fallback-url) !important;
 }
 
 .track-cover-icon {
@@ -1648,7 +1648,7 @@ body.crossfade-enabled #timelineFill {
 #nowPlayingArt.track-cover.has-cover,
 #focusArt.track-cover.has-cover,
 .track-cover.has-cover {
-  background-image: linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.24)), var(--cover-url) !important;
+  background-image: linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.24)), var(--cover-url), var(--cover-fallback-url) !important;
   background-size: cover !important;
   background-position: center !important;
 }
