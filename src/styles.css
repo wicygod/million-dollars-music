@@ -3552,6 +3552,46 @@ body.auth-locked .mobile-nav {
 .profile-stat-v2 { padding: 17px; border: 1px solid rgba(255,255,255,.085); border-radius: 17px; background: rgba(255,255,255,.032); }
 .profile-stat-v2 strong { display:block; color: rgba(255,255,255,.96); font-size: 1.28rem; line-height: 1.15; }.profile-stat-v2 span { display:block; margin-top:4px; color:rgba(255,255,255,.52); font-size:.72rem; }
 .profile-grid-v2 { display:grid; grid-template-columns: .82fr 1.18fr; gap: 12px; }
+.profile-listening-card {
+  position: relative;
+  min-height: 252px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 12% 100%, rgba(139,92,246,.2), transparent 42%),
+    radial-gradient(circle at 92% 4%, rgba(236,72,153,.11), transparent 35%),
+    rgba(255,255,255,.032);
+}
+.profile-listening-card::after {
+  content: "";
+  position: absolute;
+  width: 180px;
+  height: 180px;
+  right: -70px;
+  bottom: -105px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 50%;
+  box-shadow: 0 0 0 24px rgba(255,255,255,.018), 0 0 0 48px rgba(255,255,255,.012);
+  pointer-events: none;
+}
+.profile-listening-total { display: flex; align-items: center; gap: 15px; margin: 23px 0 22px; }
+.profile-listening-icon {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  flex: 0 0 54px;
+  place-items: center;
+  border: 1px solid rgba(196,181,253,.25);
+  border-radius: 17px;
+  color: #d8ccff;
+  background: linear-gradient(145deg, rgba(139,92,246,.28), rgba(236,72,153,.12));
+  box-shadow: 0 12px 30px rgba(76,29,149,.2);
+}
+.profile-listening-icon svg { width: 27px; height: 27px; stroke-width: 1.7; }
+.profile-listening-total strong { display: block; color: #fff; font-size: clamp(1.7rem, 2.2vw, 2.35rem); font-weight: 820; line-height: 1; letter-spacing: -.045em; }
+.profile-listening-total span { display: block; max-width: 270px; margin-top: 7px; color: rgba(255,255,255,.5); font-size: .72rem; line-height: 1.45; }
+.profile-listening-wave { display: flex; height: 38px; align-items: center; gap: 5px; padding-right: 45px; }
+.profile-listening-wave i { width: 5px; min-height: 5px; border-radius: 999px; background: linear-gradient(180deg, #c4b5fd, #ec4899); opacity: .78; }
+.profile-listening-detail { margin-top: 11px; color: rgba(255,255,255,.55); font-size: .73rem; }
 .profile-fields-v2 { display:grid; gap: 11px; }
 .profile-field-v2 { display:grid; gap: 7px; color:rgba(255,255,255,.62); font-size:.76rem; font-weight: 550; }
 .goal-track { height: 7px; margin: 10px 0 6px; overflow:hidden; border-radius:999px; background:rgba(255,255,255,.08); }.goal-track span { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#8b5cf6,#ec4899); }

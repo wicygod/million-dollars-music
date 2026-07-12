@@ -74,6 +74,11 @@ export interface BackendHomeFeed {
   global?: BackendTrack[];
 }
 
+export interface HistorySummary {
+  total_seconds: number;
+  total_tracks: number;
+}
+
 function fallbackUuid(): string {
   return `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
@@ -273,6 +278,10 @@ export async function recordTrackPlay(trackId: string | number): Promise<Backend
     throw new Error(`Backend request failed: ${response.status}`);
   }
   return response.json() as Promise<BackendTrack>;
+}
+
+export function getHistorySummary(): Promise<HistorySummary> {
+  return apiFetch<HistorySummary>("/api/history/summary");
 }
 
 export interface PreparedTrack {

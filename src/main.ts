@@ -7,6 +7,7 @@ import {
   getArtist as fetchArtist,
   getArtistTracks,
   getAuthToken,
+  getHistorySummary,
   getStoredAuthUser,
   getTrack as fetchTrack,
   loginAccount,
@@ -58,7 +59,6 @@ const DEFAULT_SETTINGS: PlayerSettings = {
 
 type EqualizerPresetId = "flat" | "bass" | "vocal" | "electronic" | "rock" | "night" | "custom";
 type EqualizerState = { enabled: boolean; preset: EqualizerPresetId; gains: number[] };
-type ProfilePreferences = { bio: string; mood: string; weeklyGoal: number };
 
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000] as const;
 const EQ_PRESETS: Record<EqualizerPresetId, { label: string; gains: number[] }> = {
@@ -71,7 +71,6 @@ const EQ_PRESETS: Record<EqualizerPresetId, { label: string; gains: number[] }> 
   custom: { label: "Свой", gains: [0, 0, 0, 0, 0, 0] },
 };
 const DEFAULT_EQUALIZER: EqualizerState = { enabled: false, preset: "flat", gains: [...EQ_PRESETS.flat.gains] };
-const DEFAULT_PROFILE_PREFERENCES: ProfilePreferences = { bio: "Музыка — мой способ настроиться на день.", mood: "Открываю новое", weeklyGoal: 180 };
 const ACCENT_COLORS: Record<string, string> = { violet: "#8b5cf6", rose: "#ec4899", cyan: "#06b6d4", lime: "#84cc16" };
 const PRIORITY_ARTISTS = ["lil peep", "9 mice", "kai angel", "viperr", "pharaoh", "темный принц", "тёмный принц", "fortuna812", "face", "cupsize", "madkid", "снялцепи"];
 const POPULAR_INITIAL_RENDER = 24;
@@ -1667,6 +1666,23 @@ function renderStationPage(container: HTMLElement, stationId: string | null) {
 // 👤  ПРОФИЛЬ
 // ----------------------------------------------------------------
 
+function formatListeningTime(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  if (hours > 0) return `${hours} ч ${minutes} мин`;
+  return `${Math.floor(safeSeconds / 60)} мин`;
+}
+
+function pluralizeTracks(count: number): string {
+  const lastTwo = Math.abs(count) % 100;
+  const last = lastTwo % 10;
+  if (lastTwo >= 11 && lastTwo <= 14) return "треков";
+  if (last === 1) return "трек";
+  if (last >= 2 && last <= 4) return "трека";
+  return "треков";
+}
+
 function renderProfile(container: HTMLElement) {
   const user = currentAuthUser || getStoredAuthUser();
   const likedCount = tracks.filter((t) => t.liked).length;
@@ -1674,9 +1690,7 @@ function renderProfile(container: HTMLElement) {
   const topArtists = [...new Set(listenedTracks.map((t) => t.artist))].slice(0, 4);
   const topTracks = listenedTracks.slice(0, 6);
   const hasRealStats = listenedTracks.length > 0;
-  const preferences = getProfilePreferences();
   const listenedMinutes = Math.round(listenedTracks.reduce((sum, track) => sum + track.duration, 0) / 60);
-  const goalProgress = Math.min(100, Math.round((listenedMinutes / Math.max(1, preferences.weeklyGoal)) * 100));
   const genreCounts = listenedTracks.reduce<Record<string, number>>((counts, track) => {
     counts[track.genre] = (counts[track.genre] || 0) + 1;
     return counts;
@@ -1705,21 +1719,20 @@ function renderProfile(container: HTMLElement) {
     <div class="profile-stats-v2">
       <div class="profile-stat-v2"><strong>${listenedTracks.length}</strong><span>Недавних треков</span></div>
       <div class="profile-stat-v2"><strong>${likedCount}</strong><span>В избранном</span></div>
-      <div class="profile-stat-v2"><strong>${listenedMinutes}</strong><span>Минут в недавнем</span></div>
+      <div class="profile-stat-v2"><strong id="profileTotalMinutesStat">${listenedMinutes}</strong><span>Минут прослушано</span></div>
       <div class="profile-stat-v2"><strong>${escapeHtml(favoriteGenre)}</strong><span>Частый жанр</span></div>
     </div>
     <div class="profile-grid-v2">
-      <section class="profile-card-v2">
-        <div class="settings-section-head"><h3>О себе</h3><span>Только на этом аккаунте</span></div>
-        <form id="profilePreferencesForm" class="profile-fields-v2">
-          <label class="profile-field-v2">Статус<input id="profileBioInput" value="${escapeHtml(preferences.bio)}" maxlength="120" /></label>
-          <label class="profile-field-v2">Музыкальное настроение<select id="profileMoodSelect">
-            ${["Открываю новое", "Всегда в ритме", "Ночной слушатель", "Музыка для фокуса"].map((mood) => `<option ${preferences.mood === mood ? "selected" : ""}>${mood}</option>`).join("")}
-          </select></label>
-          <label class="profile-field-v2">Цель на неделю: <span id="profileGoalValue">${preferences.weeklyGoal} минут</span><input id="profileGoalInput" type="range" min="30" max="600" step="30" value="${preferences.weeklyGoal}" /></label>
-          <div><div class="goal-track"><span style="width:${goalProgress}%"></span></div><div class="profile-goal-copy">${listenedMinutes} из ${preferences.weeklyGoal} минут · ${goalProgress}%</div></div>
-          <button class="profile-action-btn" type="submit">Сохранить предпочтения</button>
-        </form>
+      <section class="profile-card-v2 profile-listening-card">
+        <div class="settings-section-head"><h3>Общее время в музыке</h3><span>История аккаунта</span></div>
+        <div class="profile-listening-total">
+          <div class="profile-listening-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5l3.2 2"/></svg>
+          </div>
+          <div><strong id="profileListeningTimeValue">${formatListeningTime(listenedMinutes * 60)}</strong><span>суммарная длительность прослушанных треков</span></div>
+        </div>
+        <div class="profile-listening-wave" aria-hidden="true">${[26, 46, 72, 38, 84, 58, 92, 44, 68, 32, 76, 52, 88, 42, 64, 30, 70, 48].map((height) => `<i style="height:${height}%"></i>`).join("")}</div>
+        <p id="profileListeningTimeDetail" class="profile-listening-detail">${listenedTracks.length} ${pluralizeTracks(listenedTracks.length)} в истории аккаунта</p>
       </section>
       <section class="profile-card-v2">
         <div class="settings-section-head"><h3>Аккаунт</h3><span>ID ${user?.id ?? "—"}</span></div>
@@ -1748,21 +1761,18 @@ function renderProfile(container: HTMLElement) {
   container.querySelector("#profileFavoritesBtn")?.addEventListener("click", () => switchPage("favorites"));
   container.querySelector("#profileSettingsBtn")?.addEventListener("click", () => switchPage("settings"));
   container.querySelector("#profileEqualizerBtn")?.addEventListener("click", showEqualizerModal);
-  container.querySelector<HTMLInputElement>("#profileGoalInput")?.addEventListener("input", (event) => {
-    const value = (event.currentTarget as HTMLInputElement).value;
-    const output = container.querySelector("#profileGoalValue");
-    if (output) output.textContent = `${value} минут`;
-  });
-  container.querySelector<HTMLFormElement>("#profilePreferencesForm")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    saveProfilePreferences({
-      bio: (container.querySelector<HTMLInputElement>("#profileBioInput")?.value || "").trim(),
-      mood: container.querySelector<HTMLSelectElement>("#profileMoodSelect")?.value || DEFAULT_PROFILE_PREFERENCES.mood,
-      weeklyGoal: Number(container.querySelector<HTMLInputElement>("#profileGoalInput")?.value || DEFAULT_PROFILE_PREFERENCES.weeklyGoal),
-    });
-    showTrackNotice("Предпочтения профиля сохранены");
-    renderProfile(container);
-  });
+
+  void getHistorySummary().then((summary) => {
+    if (!container.isConnected) return;
+    const totalSeconds = Math.max(0, Number(summary.total_seconds) || 0);
+    const totalMinutes = Math.floor(totalSeconds / 60);
+    const value = container.querySelector("#profileListeningTimeValue");
+    const detail = container.querySelector("#profileListeningTimeDetail");
+    const stat = container.querySelector("#profileTotalMinutesStat");
+    if (value) value.textContent = formatListeningTime(totalSeconds);
+    if (detail) detail.textContent = `${summary.total_tracks} ${pluralizeTracks(summary.total_tracks)} в истории аккаунта`;
+    if (stat) stat.textContent = String(totalMinutes);
+  }).catch(() => { /* keep the locally available fallback */ });
 
   container.querySelector<HTMLFormElement>("#profileNicknameForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2824,7 +2834,6 @@ const STORAGE_KEY_PLREMOVED = "mm_plremoved";
 const STORAGE_KEY_PLORDER = "mm_plorder";
 const STORAGE_KEY_USER_PLAYLISTS = "mm_user_playlists";
 const STORAGE_KEY_EQUALIZER = "mm_equalizer";
-const STORAGE_KEY_PROFILE_PREFERENCES = "mm_profile_preferences";
 
 let savedSettings: Record<string, any> | null = null;
 let playlistTrackAssign: Record<string, TrackId[]> = {};
@@ -2908,18 +2917,6 @@ function loadEqualizerState() {
     }
   } catch { /* ignore malformed local state */ }
   applyEqualizerGains();
-}
-
-function getProfilePreferences(): ProfilePreferences {
-  try {
-    const raw = localStorage.getItem(accountStorageKey(STORAGE_KEY_PROFILE_PREFERENCES));
-    if (raw) return { ...DEFAULT_PROFILE_PREFERENCES, ...(JSON.parse(raw) as Partial<ProfilePreferences>) };
-  } catch { /* ignore malformed local state */ }
-  return { ...DEFAULT_PROFILE_PREFERENCES };
-}
-
-function saveProfilePreferences(preferences: ProfilePreferences) {
-  localStorage.setItem(accountStorageKey(STORAGE_KEY_PROFILE_PREFERENCES), JSON.stringify(preferences));
 }
 
 function savePlaylistTrackAssign() {
