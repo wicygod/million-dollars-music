@@ -3146,12 +3146,20 @@ function seekActiveTrack(seconds: number) {
   const sourceUrl = getTrackPlaybackUrl(track);
   if (!sourceUrl) return;
 
-  if (hlsPlayer || isHlsPlaybackUrl(sourceUrl) || !sourceUrl.startsWith(API_BASE_URL)) {
-    if (Number.isFinite(audioEl.duration)) audioEl.currentTime = target;
-    return;
+  const shouldResume = player.playing;
+  const nativeTarget = Math.max(0, target - currentStreamOffset);
+  if (audioEl.readyState >= HTMLMediaElement.HAVE_METADATA && Number.isFinite(audioEl.duration)) {
+    try {
+      audioEl.currentTime = nativeTarget;
+      player.playing = shouldResume;
+      if (shouldResume) beginPlaybackBuffering(playbackToken);
+      return;
+    } catch {
+      // Some providers expose a non-seekable stream. The fresh-stream fallback
+      // below keeps those tracks seekable as well.
+    }
   }
 
-  const shouldResume = player.playing;
   const token = ++playbackToken;
   currentStreamOffset = target;
   audioEl.pause();
@@ -3189,6 +3197,11 @@ audioEl.addEventListener("waiting", () => {
 
 audioEl.addEventListener("stalled", () => {
   if (player.playing && activeAudioTrackId) beginPlaybackBuffering(playbackToken);
+});
+
+audioEl.addEventListener("seeked", () => {
+  clearPlaybackBuffering();
+  updatePlayIcon();
 });
 
 audioEl.addEventListener("pause", () => {
