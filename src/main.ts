@@ -1,5 +1,9 @@
 ﻿import { LEGACY_TRACK_ID_MAP, getInitialMetadataFeed, loadHomeFeed, type MetadataFeed, type Track } from "./metadataFeedService";
-import Hls from "hls.js";
+import { EqualizerEngine, DEFAULT_EQUALIZER, EQ_FREQUENCIES, EQ_PRESETS, equalizerCurvePoints, formatEqFrequency, formatEqGain, type EqualizerPreset, type EqualizerPresetId, type EqualizerState } from "./features/equalizer";
+import { applyHistorySummaryToProfile, pluralizeTracks } from "./features/profile";
+import { filterLocalSearchTracks, highlightMatch } from "./features/search";
+import { ACCENT_COLORS, DEFAULT_SETTINGS, settingSwitch, type PlayerSettings } from "./features/settings";
+import { loadHlsConstructor, type HlsPlayer } from "./player/hlsLoader";
 import {
   addListeningTime,
   API_BASE_URL,
@@ -20,7 +24,6 @@ import {
   searchCatalog,
   submitBugReport,
   type AuthUser,
-  type HistorySummary,
   updateAvatar,
   updateNickname,
   withAppToken,
@@ -36,51 +39,6 @@ let metadataFeed: MetadataFeed = getInitialMetadataFeed();
 let tracks: Track[] = [...metadataFeed.all];
 let currentAuthUser: AuthUser | null = getStoredAuthUser();
 
-type PlayerSettings = {
-  theme: boolean;
-  scale: string;
-  normalize: boolean;
-  crossfade: boolean;
-  autoplay: boolean;
-  prefetch: boolean;
-  compact: boolean;
-  reduceMotion: boolean;
-  accent: string;
-};
-
-const DEFAULT_SETTINGS: PlayerSettings = {
-  theme: true,
-  scale: "100",
-  normalize: false,
-  crossfade: false,
-  autoplay: true,
-  prefetch: true,
-  compact: false,
-  reduceMotion: false,
-  accent: "violet",
-};
-
-type EqualizerPresetId = "flat" | "bass" | "subbass" | "punch" | "hiphop" | "vocal" | "electronic" | "rock" | "acoustic" | "cinema" | "night" | "custom";
-type EqualizerPreset = { label: string; description: string; icon: string; preamp: number; gains: number[] };
-type EqualizerState = { enabled: boolean; preset: EqualizerPresetId; preamp: number; gains: number[] };
-
-const EQ_FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000] as const;
-const EQ_PRESETS: Record<EqualizerPresetId, EqualizerPreset> = {
-  flat: { label: "Ровный", description: "Без окрашивания", icon: "—", preamp: 0, gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
-  bass: { label: "Больше баса", description: "Мощный низ без гула", icon: "B", preamp: -4, gains: [9, 12, 10, 6, 2, 0, -1, -2, -2, -1] },
-  subbass: { label: "Саб-бас", description: "Глубина ниже 100 Гц", icon: "S", preamp: -5, gains: [12, 11, 7, 3, 0, -1, -2, -3, -3, -3] },
-  punch: { label: "Панч", description: "Удар бочки и атака", icon: "P", preamp: -3, gains: [3, 7, 9, 5, 0, -1, 1, 3, 2, 1] },
-  hiphop: { label: "Хип-хоп", description: "Плотный бит и вокал", icon: "H", preamp: -4, gains: [8, 10, 8, 3, -1, 0, 2, 3, 4, 3] },
-  vocal: { label: "Вокал", description: "Голос ближе и чище", icon: "V", preamp: -3, gains: [-4, -3, -2, 0, 2, 5, 6, 3, 1, 0] },
-  electronic: { label: "Электроника", description: "V-образный клубный звук", icon: "E", preamp: -4, gains: [7, 7, 4, 0, -2, -1, 2, 5, 7, 6] },
-  rock: { label: "Рок", description: "Гитары и живые барабаны", icon: "R", preamp: -3, gains: [5, 4, 2, 0, -1, 2, 4, 5, 4, 3] },
-  acoustic: { label: "Акустика", description: "Естественные инструменты", icon: "A", preamp: -2, gains: [-2, -1, 0, 2, 4, 4, 3, 2, 1, 2] },
-  cinema: { label: "Кино", description: "Масштаб и разборчивость", icon: "C", preamp: -4, gains: [8, 7, 4, 1, -1, 1, 4, 6, 5, 3] },
-  night: { label: "Ночной", description: "Мягко на тихой громкости", icon: "N", preamp: -3, gains: [6, 5, 3, 1, 0, -1, -3, -4, -5, -6] },
-  custom: { label: "Свой профиль", description: "Ручная настройка", icon: "✦", preamp: 0, gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
-};
-const DEFAULT_EQUALIZER: EqualizerState = { enabled: false, preset: "flat", preamp: EQ_PRESETS.flat.preamp, gains: [...EQ_PRESETS.flat.gains] };
-const ACCENT_COLORS: Record<string, string> = { violet: "#8b5cf6", rose: "#ec4899", cyan: "#06b6d4", lime: "#84cc16" };
 const PRIORITY_ARTISTS = ["lil peep", "9 mice", "kai angel", "viperr", "pharaoh", "темный принц", "тёмный принц", "fortuna812", "face", "cupsize", "madkid", "снялцепи"];
 const POPULAR_INITIAL_RENDER = 24;
 const POPULAR_RENDER_STEP = 24;
@@ -204,64 +162,21 @@ function getOrCreateAudioElement(): HTMLAudioElement {
 
 const audioEl = getOrCreateAudioElement();
 audioEl.crossOrigin = "anonymous";
-let hlsPlayer: Hls | null = null;
+let hlsPlayer: HlsPlayer | null = null;
 let activeAudioTrackId: TrackId | null = null;
 let playbackToken = 0;
 let playbackWatchdog: number | null = null;
 let currentStreamOffset = 0;
 let pendingSeekCleanup: (() => void) | null = null;
 let equalizerState: EqualizerState = { ...DEFAULT_EQUALIZER, gains: [...DEFAULT_EQUALIZER.gains] };
-let audioContext: AudioContext | null = null;
-let audioSourceNode: MediaElementAudioSourceNode | null = null;
-let equalizerFilters: BiquadFilterNode[] = [];
-let equalizerPreamp: GainNode | null = null;
-let equalizerLimiter: DynamicsCompressorNode | null = null;
+const equalizerEngine = new EqualizerEngine(audioEl);
 
 function applyEqualizerGains() {
-  if (equalizerPreamp) {
-    const preampDb = equalizerState.enabled ? equalizerState.preamp : 0;
-    equalizerPreamp.gain.setTargetAtTime(Math.pow(10, preampDb / 20), audioContext?.currentTime || 0, 0.025);
-  }
-  equalizerFilters.forEach((filter, index) => {
-    const gain = equalizerState.enabled ? Number(equalizerState.gains[index] || 0) : 0;
-    filter.gain.setTargetAtTime(gain, audioContext?.currentTime || 0, 0.015);
-  });
+  equalizerEngine.apply(equalizerState);
 }
 
 async function ensureAudioGraph(): Promise<boolean> {
-  try {
-    if (!audioContext) {
-      audioContext = new AudioContext();
-      audioSourceNode = audioContext.createMediaElementSource(audioEl);
-      equalizerPreamp = audioContext.createGain();
-      equalizerLimiter = audioContext.createDynamicsCompressor();
-      equalizerLimiter.threshold.value = -1.5;
-      equalizerLimiter.knee.value = 4;
-      equalizerLimiter.ratio.value = 12;
-      equalizerLimiter.attack.value = 0.003;
-      equalizerLimiter.release.value = 0.24;
-      equalizerFilters = EQ_FREQUENCIES.map((frequency, index) => {
-        const filter = audioContext!.createBiquadFilter();
-        filter.type = index === 0 ? "lowshelf" : index === EQ_FREQUENCIES.length - 1 ? "highshelf" : "peaking";
-        filter.frequency.value = frequency;
-        filter.Q.value = index === 0 || index === EQ_FREQUENCIES.length - 1 ? 0.72 : 1.15;
-        return filter;
-      });
-      audioSourceNode.connect(equalizerPreamp);
-      let previous: AudioNode = equalizerPreamp;
-      equalizerFilters.forEach((filter) => {
-        previous.connect(filter);
-        previous = filter;
-      });
-      previous.connect(equalizerLimiter);
-      equalizerLimiter.connect(audioContext.destination);
-      applyEqualizerGains();
-    }
-    if (audioContext.state === "suspended") await audioContext.resume();
-    return true;
-  } catch {
-    return false;
-  }
+  return equalizerEngine.ensure(equalizerState);
 }
 
 function getTrack(id: TrackId | null | undefined): Track | undefined {
@@ -1764,43 +1679,6 @@ function renderStationPage(container: HTMLElement, stationId: string | null) {
 // 👤  ПРОФИЛЬ
 // ----------------------------------------------------------------
 
-function formatListeningTime(totalSeconds: number): string {
-  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
-  const hours = Math.floor(safeSeconds / 3600);
-  const minutes = Math.floor((safeSeconds % 3600) / 60);
-  if (hours > 0) return `${hours} ч ${minutes} мин`;
-  const totalMinutes = Math.floor(safeSeconds / 60);
-  return `${totalMinutes} ${pluralizeMinutes(totalMinutes)}`;
-}
-
-function pluralizeMinutes(count: number): string {
-  const lastTwo = Math.abs(count) % 100;
-  const last = lastTwo % 10;
-  if (lastTwo >= 11 && lastTwo <= 14) return "минут";
-  if (last === 1) return "минута";
-  if (last >= 2 && last <= 4) return "минуты";
-  return "минут";
-}
-
-function pluralizeTracks(count: number): string {
-  const lastTwo = Math.abs(count) % 100;
-  const last = lastTwo % 10;
-  if (lastTwo >= 11 && lastTwo <= 14) return "треков";
-  if (last === 1) return "трек";
-  if (last >= 2 && last <= 4) return "трека";
-  return "треков";
-}
-
-function applyHistorySummaryToProfile(summary: HistorySummary) {
-  const totalSeconds = Math.max(0, Number(summary.total_seconds) || 0);
-  const value = document.querySelector("#profileListeningTimeValue");
-  const detail = document.querySelector("#profileListeningTimeDetail");
-  const stat = document.querySelector("#profileTotalMinutesStat");
-  if (value) value.textContent = formatListeningTime(totalSeconds);
-  if (detail) detail.textContent = `${summary.total_tracks} ${pluralizeTracks(summary.total_tracks)} в истории аккаунта`;
-  if (stat) stat.textContent = String(Math.floor(totalSeconds / 60));
-}
-
 function renderProfile(container: HTMLElement) {
   const user = currentAuthUser || getStoredAuthUser();
   const likedCount = tracks.filter((t) => t.liked).length;
@@ -2149,23 +2027,6 @@ makeDraggable(focusTimeline, focusTimelineFill, focusTimelineThumb, (pct) => {
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
-function formatEqFrequency(frequency: number): string {
-  return frequency >= 1000 ? `${frequency / 1000}k` : String(frequency);
-}
-
-function formatEqGain(gain: number): string {
-  const rounded = Number.isInteger(gain) ? String(gain) : gain.toFixed(1);
-  return `${gain > 0 ? "+" : ""}${rounded} dB`;
-}
-
-function equalizerCurvePoints(gains: number[]): string {
-  return gains.map((gain, index) => {
-    const x = (index / Math.max(1, gains.length - 1)) * 100;
-    const y = 50 - (Math.max(-12, Math.min(12, gain)) / 12) * 38;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
-}
-
 function showEqualizerModal() {
   document.querySelector(".equalizer-overlay")?.remove();
   const trigger = document.getElementById("hdrEqualizer") as HTMLButtonElement | null;
@@ -2303,13 +2164,6 @@ function showEqualizerModal() {
   });
   syncControls();
   window.setTimeout(() => closeButton.focus(), 30);
-}
-
-function settingSwitch(id: string, checked: boolean): string {
-  return `<label class="relative inline-flex items-center cursor-pointer">
-    <input id="${id}" type="checkbox" ${checked ? "checked" : ""} class="sr-only peer">
-    <span class="w-9 h-5 bg-white/10 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:duration-300 peer-checked:after:translate-x-4"></span>
-  </label>`;
 }
 
 function renderSettings(container: HTMLElement) {
@@ -2741,7 +2595,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
   const searchToken = ++searchRequestToken;
   const searchTargetLimit = 150;
   const isCurrentSearch = () => currentPage === "search" && currentPageParam === query && searchToken === searchRequestToken;
-  const localResults = () => tracks.filter((t) => t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q) || t.genre.includes(q) || t.tags.some((tag) => tag.toLowerCase().includes(q)));
+  const localResults = () => filterLocalSearchTracks(tracks, q);
   const renderBackendResults = (items: Track[], message = "") => {
     if (!isCurrentSearch()) return;
     if (items.length === 0) {
@@ -2852,74 +2706,6 @@ function renderSearchResults(container: HTMLElement, query: string) {
       window.clearTimeout(searchFallbackTimer);
       showSavedSearchResults();
     });
-  return;
-  const results = tracks.filter((t) => t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q) || t.genre.includes(q) || t.tags.some((tag) => tag.toLowerCase().includes(q)));
-
-  if (results.length === 0) {
-    container.innerHTML = `
-      <div class="flex flex-col items-center justify-center py-16">
-        <div class="text-5xl mb-4">🔍</div>
-        <h2 class="text-lg font-semibold mb-2">Ничего не найдено</h2>
-        <p class="text-sm text-white/40">По запросу «${query}» ничего не найдено. Попробуйте другой поиск.</p>
-      </div>
-    `;
-    return;
-  }
-
-  container.innerHTML = `
-    <div class="flex items-center justify-between mb-4">
-      <h2 class="text-base font-semibold tracking-wide">Результаты поиска</h2>
-      <span class="text-xs text-white/40">${results.length} треков</span>
-    </div>
-    <div class="space-y-1">
-      ${results.map((t, i) => `
-        <div class="search-track group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99]" data-id="${t.id}">
-          <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
-          ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
-          <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium truncate">${highlightMatch(t.title, q)}</p>
-            <p class="text-xs text-white/40 truncate">${highlightMatch(t.artist, q)}</p>
-          </div>
-          <button class="search-like-btn text-white/20 hover:text-red-400 transition-all duration-300 opacity-0 group-hover:opacity-100 cursor-pointer ml-1 shrink-0 ${t.liked ? "text-red-400 opacity-100" : ""}" data-track-id="${t.id}" title="Лайк">
-            <svg class="w-4 h-4" fill="${t.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
-          </button>
-          <button class="search-add-btn text-white/20 hover:text-indigo-400 transition-all duration-300 opacity-0 group-hover:opacity-100 cursor-pointer ml-1 shrink-0" data-track-id="${t.id}" title="Добавить в плейлист">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-          </button>
-          <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
-        </div>
-      `).join("")}
-    </div>
-  `;
-
-  container.querySelectorAll<HTMLElement>(".search-track").forEach((el) => {
-    el.addEventListener("click", () => {
-      const id = getElementTrackId(el);
-      if (id) activateTrack(results, id);
-    });
-  });
-  container.querySelectorAll<HTMLElement>(".search-like-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const trackId = getElementTrackId(btn, "data-track-id");
-      if (trackId) toggleTrackLike(trackId);
-      renderSearchResults(container, query);
-    });
-  });
-  container.querySelectorAll<HTMLElement>(".search-add-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const trackId = getElementTrackId(btn, "data-track-id");
-      if (trackId) showPlaylistPopup(btn, trackId);
-    });
-  });
-}
-
-function highlightMatch(text: string, query: string): string {
-  if (!query) return escapeHtml(text);
-  const idx = text.toLowerCase().indexOf(query);
-  if (idx === -1) return escapeHtml(text);
-  return `${escapeHtml(text.slice(0, idx))}<span class="text-indigo-400">${escapeHtml(text.slice(idx, idx + query.length))}</span>${escapeHtml(text.slice(idx + query.length))}`;
 }
 
 // ----------------------------------------------------------------
@@ -3543,20 +3329,24 @@ function startAudio(track: Track) {
     if (token === playbackToken && activeAudioTrackId === track.id && player.playing) recordActiveTrackPlay();
   }, 2000);
 
-  void getTrackPlaybackUrl(track).then((sourceUrl) => {
+  void getTrackPlaybackUrl(track).then(async (sourceUrl) => {
     if (!sourceUrl || token !== playbackToken || activeAudioTrackId !== track.id || !player.playing) return;
-    if (Hls.isSupported() && isHlsPlaybackUrl(sourceUrl)) {
-      hlsPlayer = new Hls();
-      hlsPlayer.loadSource(sourceUrl);
-      hlsPlayer.attachMedia(audioEl);
-      hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => playLoadedAudio(token));
-      hlsPlayer.on(Hls.Events.ERROR, (_event, data) => {
-        if (token !== playbackToken || !data.fatal) return;
-        hlsPlayer?.destroy();
-        hlsPlayer = null;
-        attachNativeAudio(sourceUrl, token, 0);
-      });
-      return;
+    if (isHlsPlaybackUrl(sourceUrl)) {
+      const HlsConstructor = await loadHlsConstructor();
+      if (token !== playbackToken || activeAudioTrackId !== track.id || !player.playing) return;
+      if (HlsConstructor.isSupported()) {
+        hlsPlayer = new HlsConstructor();
+        hlsPlayer.loadSource(sourceUrl);
+        hlsPlayer.attachMedia(audioEl);
+        hlsPlayer.on(HlsConstructor.Events.MANIFEST_PARSED, () => playLoadedAudio(token));
+        hlsPlayer.on(HlsConstructor.Events.ERROR, (_event, data) => {
+          if (token !== playbackToken || !data.fatal) return;
+          hlsPlayer?.destroy();
+          hlsPlayer = null;
+          attachNativeAudio(sourceUrl, token, 0);
+        });
+        return;
+      }
     }
     attachNativeAudio(sourceUrl, token, 0);
   }).catch(() => {
