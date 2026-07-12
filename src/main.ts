@@ -496,11 +496,17 @@ let listeningSyncInFlight = false;
 const preparedTrackIds = new Set<TrackId>();
 let activePreparationTrackId: TrackId | null = null;
 let queuedPreparationTrackId: TrackId | null = null;
+const warmupPreparationTrackIds: TrackId[] = [];
 
 function runQueuedTrackPreparation() {
-  const trackId = queuedPreparationTrackId;
-  if (!trackId || activePreparationTrackId || preparedTrackIds.has(trackId)) return;
+  if (activePreparationTrackId) return;
+  const trackId = queuedPreparationTrackId || warmupPreparationTrackIds.shift() || null;
+  if (!trackId) return;
   queuedPreparationTrackId = null;
+  if (preparedTrackIds.has(trackId) || trackId === activeAudioTrackId) {
+    runQueuedTrackPreparation();
+    return;
+  }
   activePreparationTrackId = trackId;
   prepareTrackPlayback(trackId)
     .then(() => preparedTrackIds.add(trackId))
@@ -509,6 +515,16 @@ function runQueuedTrackPreparation() {
       activePreparationTrackId = null;
       runQueuedTrackPreparation();
     });
+}
+
+function schedulePopularTrackWarmup(items: Track[]) {
+  if (!getPlayerSettings().prefetch || !getAuthToken()) return;
+  items.slice(0, 6).forEach((track) => {
+    if (!/^\d+$/.test(String(track.id)) || preparedTrackIds.has(track.id)) return;
+    if (activePreparationTrackId === track.id || warmupPreparationTrackIds.includes(track.id)) return;
+    warmupPreparationTrackIds.push(track.id);
+  });
+  runQueuedTrackPreparation();
 }
 
 function prepareTrackInBackground(trackId: TrackId | null | undefined) {
@@ -852,6 +868,7 @@ function refreshMetadataFeed(attempt = 1) {
       if (feed.source !== metadataFeed.source || feed.errorMessage !== metadataFeed.errorMessage || currentSignature !== nextSignature) {
         applyMetadataFeed(feed);
       }
+      schedulePopularTrackWarmup(feed.trending.length ? feed.trending : feed.all);
       if (feed.errorMessage && attempt < 8) {
         window.setTimeout(() => refreshMetadataFeed(attempt + 1), 1500 * attempt);
       }
