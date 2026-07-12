@@ -59,20 +59,26 @@ const DEFAULT_SETTINGS: PlayerSettings = {
   accent: "violet",
 };
 
-type EqualizerPresetId = "flat" | "bass" | "vocal" | "electronic" | "rock" | "night" | "custom";
-type EqualizerState = { enabled: boolean; preset: EqualizerPresetId; gains: number[] };
+type EqualizerPresetId = "flat" | "bass" | "subbass" | "punch" | "hiphop" | "vocal" | "electronic" | "rock" | "acoustic" | "cinema" | "night" | "custom";
+type EqualizerPreset = { label: string; description: string; icon: string; preamp: number; gains: number[] };
+type EqualizerState = { enabled: boolean; preset: EqualizerPresetId; preamp: number; gains: number[] };
 
-const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000] as const;
-const EQ_PRESETS: Record<EqualizerPresetId, { label: string; gains: number[] }> = {
-  flat: { label: "Ровный", gains: [0, 0, 0, 0, 0, 0] },
-  bass: { label: "Больше баса", gains: [8, 5, 2, 0, -1, -2] },
-  vocal: { label: "Вокал", gains: [-2, -1, 1, 5, 3, 0] },
-  electronic: { label: "Электроника", gains: [5, 3, 0, -1, 3, 6] },
-  rock: { label: "Рок", gains: [4, 2, -1, 1, 4, 5] },
-  night: { label: "Ночной", gains: [3, 2, 0, -1, -3, -4] },
-  custom: { label: "Свой", gains: [0, 0, 0, 0, 0, 0] },
+const EQ_FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000] as const;
+const EQ_PRESETS: Record<EqualizerPresetId, EqualizerPreset> = {
+  flat: { label: "Ровный", description: "Без окрашивания", icon: "—", preamp: 0, gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+  bass: { label: "Больше баса", description: "Мощный низ без гула", icon: "B", preamp: -4, gains: [9, 12, 10, 6, 2, 0, -1, -2, -2, -1] },
+  subbass: { label: "Саб-бас", description: "Глубина ниже 100 Гц", icon: "S", preamp: -5, gains: [12, 11, 7, 3, 0, -1, -2, -3, -3, -3] },
+  punch: { label: "Панч", description: "Удар бочки и атака", icon: "P", preamp: -3, gains: [3, 7, 9, 5, 0, -1, 1, 3, 2, 1] },
+  hiphop: { label: "Хип-хоп", description: "Плотный бит и вокал", icon: "H", preamp: -4, gains: [8, 10, 8, 3, -1, 0, 2, 3, 4, 3] },
+  vocal: { label: "Вокал", description: "Голос ближе и чище", icon: "V", preamp: -3, gains: [-4, -3, -2, 0, 2, 5, 6, 3, 1, 0] },
+  electronic: { label: "Электроника", description: "V-образный клубный звук", icon: "E", preamp: -4, gains: [7, 7, 4, 0, -2, -1, 2, 5, 7, 6] },
+  rock: { label: "Рок", description: "Гитары и живые барабаны", icon: "R", preamp: -3, gains: [5, 4, 2, 0, -1, 2, 4, 5, 4, 3] },
+  acoustic: { label: "Акустика", description: "Естественные инструменты", icon: "A", preamp: -2, gains: [-2, -1, 0, 2, 4, 4, 3, 2, 1, 2] },
+  cinema: { label: "Кино", description: "Масштаб и разборчивость", icon: "C", preamp: -4, gains: [8, 7, 4, 1, -1, 1, 4, 6, 5, 3] },
+  night: { label: "Ночной", description: "Мягко на тихой громкости", icon: "N", preamp: -3, gains: [6, 5, 3, 1, 0, -1, -3, -4, -5, -6] },
+  custom: { label: "Свой профиль", description: "Ручная настройка", icon: "✦", preamp: 0, gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
 };
-const DEFAULT_EQUALIZER: EqualizerState = { enabled: false, preset: "flat", gains: [...EQ_PRESETS.flat.gains] };
+const DEFAULT_EQUALIZER: EqualizerState = { enabled: false, preset: "flat", preamp: EQ_PRESETS.flat.preamp, gains: [...EQ_PRESETS.flat.gains] };
 const ACCENT_COLORS: Record<string, string> = { violet: "#8b5cf6", rose: "#ec4899", cyan: "#06b6d4", lime: "#84cc16" };
 const PRIORITY_ARTISTS = ["lil peep", "9 mice", "kai angel", "viperr", "pharaoh", "темный принц", "тёмный принц", "fortuna812", "face", "cupsize", "madkid", "снялцепи"];
 const POPULAR_INITIAL_RENDER = 24;
@@ -211,9 +217,9 @@ let equalizerPreamp: GainNode | null = null;
 let equalizerLimiter: DynamicsCompressorNode | null = null;
 
 function applyEqualizerGains() {
-  const maximumBoost = equalizerState.enabled ? Math.max(0, ...equalizerState.gains) : 0;
   if (equalizerPreamp) {
-    equalizerPreamp.gain.setTargetAtTime(Math.pow(10, -maximumBoost / 20), audioContext?.currentTime || 0, 0.02);
+    const preampDb = equalizerState.enabled ? equalizerState.preamp : 0;
+    equalizerPreamp.gain.setTargetAtTime(Math.pow(10, preampDb / 20), audioContext?.currentTime || 0, 0.025);
   }
   equalizerFilters.forEach((filter, index) => {
     const gain = equalizerState.enabled ? Number(equalizerState.gains[index] || 0) : 0;
@@ -228,16 +234,16 @@ async function ensureAudioGraph(): Promise<boolean> {
       audioSourceNode = audioContext.createMediaElementSource(audioEl);
       equalizerPreamp = audioContext.createGain();
       equalizerLimiter = audioContext.createDynamicsCompressor();
-      equalizerLimiter.threshold.value = -4;
-      equalizerLimiter.knee.value = 8;
-      equalizerLimiter.ratio.value = 5;
-      equalizerLimiter.attack.value = 0.004;
-      equalizerLimiter.release.value = 0.18;
+      equalizerLimiter.threshold.value = -1.5;
+      equalizerLimiter.knee.value = 4;
+      equalizerLimiter.ratio.value = 12;
+      equalizerLimiter.attack.value = 0.003;
+      equalizerLimiter.release.value = 0.24;
       equalizerFilters = EQ_FREQUENCIES.map((frequency, index) => {
         const filter = audioContext!.createBiquadFilter();
         filter.type = index === 0 ? "lowshelf" : index === EQ_FREQUENCIES.length - 1 ? "highshelf" : "peaking";
         filter.frequency.value = frequency;
-        filter.Q.value = index === 0 || index === EQ_FREQUENCIES.length - 1 ? 0.7 : 1.05;
+        filter.Q.value = index === 0 || index === EQ_FREQUENCIES.length - 1 ? 0.72 : 1.15;
         return filter;
       });
       audioSourceNode.connect(equalizerPreamp);
@@ -2125,28 +2131,66 @@ makeDraggable(focusTimeline, focusTimelineFill, focusTimelineThumb, (pct) => {
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
+function formatEqFrequency(frequency: number): string {
+  return frequency >= 1000 ? `${frequency / 1000}k` : String(frequency);
+}
+
+function formatEqGain(gain: number): string {
+  const rounded = Number.isInteger(gain) ? String(gain) : gain.toFixed(1);
+  return `${gain > 0 ? "+" : ""}${rounded} dB`;
+}
+
+function equalizerCurvePoints(gains: number[]): string {
+  return gains.map((gain, index) => {
+    const x = (index / Math.max(1, gains.length - 1)) * 100;
+    const y = 50 - (Math.max(-12, Math.min(12, gain)) / 12) * 38;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
 function showEqualizerModal() {
   document.querySelector(".equalizer-overlay")?.remove();
   const trigger = document.getElementById("hdrEqualizer") as HTMLButtonElement | null;
   const overlay = document.createElement("div");
   overlay.className = "equalizer-overlay";
-  const presetEntries = (Object.entries(EQ_PRESETS) as [EqualizerPresetId, { label: string; gains: number[] }][]).filter(
-    ([id]) => id !== "custom",
-  );
+  const presetEntries = (Object.entries(EQ_PRESETS) as [EqualizerPresetId, EqualizerPreset][]).filter(([id]) => id !== "custom");
+  const activePreset = EQ_PRESETS[equalizerState.preset];
   overlay.innerHTML = `
     <section class="equalizer-modal" role="dialog" aria-modal="true" aria-labelledby="equalizerTitle">
       <div class="equalizer-head">
-        <div><div id="equalizerTitle" class="equalizer-title">Эквалайзер</div><div class="equalizer-subtitle">Настройте характер звука или выберите готовый профиль</div></div>
+        <div><div class="equalizer-kicker">MILLION AUDIO ENGINE</div><div id="equalizerTitle" class="equalizer-title">Эквалайзер</div><div class="equalizer-subtitle">10-полосная коррекция звука в реальном времени</div></div>
         <button class="equalizer-close" type="button" aria-label="Закрыть">×</button>
       </div>
+
+      <div class="equalizer-visual">
+        <div class="equalizer-current-preset"><span data-eq-current-icon>${activePreset.icon}</span><div><strong data-eq-current-title>${activePreset.label}</strong><small data-eq-current-description>${activePreset.description}</small></div></div>
+        <div class="equalizer-curve-wrap" aria-hidden="true">
+          <svg class="equalizer-curve" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <defs><linearGradient id="eqCurveGradient" x1="0" x2="1"><stop stop-color="#8b5cf6"/><stop offset=".52" stop-color="#a78bfa"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs>
+            <path class="equalizer-curve-grid" d="M0 12H100 M0 50H100 M0 88H100"/>
+            <polyline data-eq-curve points="${equalizerCurvePoints(equalizerState.gains)}"/>
+          </svg>
+          <span class="equalizer-curve-high">+12</span><span class="equalizer-curve-zero">0</span><span class="equalizer-curve-low">−12</span>
+        </div>
+      </div>
+
       <div class="equalizer-toolbar">
-        <div class="equalizer-status"><button class="equalizer-power ${equalizerState.enabled ? "is-on" : ""}" type="button" role="switch" aria-checked="${equalizerState.enabled}"></button><span>${equalizerState.enabled ? "Обработка включена" : "Обработка выключена"}</span></div>
-        <div class="equalizer-presets">${presetEntries.map(([id, preset]) => `<button class="equalizer-preset ${equalizerState.preset === id ? "is-active" : ""}" type="button" data-eq-preset="${id}">${preset.label}</button>`).join("")}</div>
+        <div class="equalizer-status"><button class="equalizer-power ${equalizerState.enabled ? "is-on" : ""}" type="button" role="switch" aria-checked="${equalizerState.enabled}"></button><div><strong>${equalizerState.enabled ? "Эквалайзер включён" : "Эквалайзер выключен"}</strong><small>Мгновенное A/B сравнение</small></div></div>
+        <label class="equalizer-preamp"><span>Предусилитель <output data-eq-preamp-output>${formatEqGain(equalizerState.preamp)}</output></span><input data-eq-preamp type="range" min="-12" max="3" step="0.5" value="${equalizerState.preamp}" /></label>
+        <button class="equalizer-reset" type="button">Сбросить</button>
       </div>
-      <div class="equalizer-bands">
-        ${EQ_FREQUENCIES.map((frequency, index) => `<label class="equalizer-band"><output data-eq-output="${index}">${equalizerState.gains[index] > 0 ? "+" : ""}${equalizerState.gains[index]} dB</output><input type="range" min="-12" max="12" step="1" value="${equalizerState.gains[index]}" data-eq-band="${index}" aria-label="${frequency < 1000 ? frequency : `${frequency / 1000} к`} герц"><span>${frequency < 1000 ? frequency : `${frequency / 1000}k`} Hz</span></label>`).join("")}
+
+      <div class="equalizer-section-label"><span>Готовые профили</span><small>Выберите характер звучания</small></div>
+      <div class="equalizer-presets">${presetEntries.map(([id, preset]) => `<button class="equalizer-preset ${equalizerState.preset === id ? "is-active" : ""}" type="button" data-eq-preset="${id}"><span>${preset.icon}</span><div><strong>${preset.label}</strong><small>${preset.description}</small></div></button>`).join("")}</div>
+
+      <div class="equalizer-section-label equalizer-bands-label"><span>Точная настройка</span><small>Двойной клик по полосе возвращает 0 dB</small></div>
+      <div class="equalizer-bands-shell">
+        <div class="equalizer-db-scale"><span>+12</span><span>0</span><span>−12</span></div>
+        <div class="equalizer-bands">
+          ${EQ_FREQUENCIES.map((frequency, index) => `<label class="equalizer-band"><output data-eq-output="${index}">${formatEqGain(equalizerState.gains[index])}</output><input type="range" min="-12" max="12" step="0.5" value="${equalizerState.gains[index]}" data-eq-band="${index}" aria-label="${frequency} герц"><span>${formatEqFrequency(frequency)}</span><small>Hz</small></label>`).join("")}
+        </div>
       </div>
-      <div class="equalizer-footnote"><span>Автоматический запас громкости защищает звук от перегрузки</span><span>${EQ_FREQUENCIES.length} полос · −12…+12 dB</span></div>
+      <div class="equalizer-footnote"><span><i></i> Защита от перегрузки активна</span><span>${EQ_FREQUENCIES.length} полос · −12…+12 dB · 32-bit Web Audio</span></div>
     </section>`;
   document.body.appendChild(overlay);
   trigger?.setAttribute("aria-expanded", "true");
@@ -2154,56 +2198,79 @@ function showEqualizerModal() {
   const modal = overlay.querySelector<HTMLElement>(".equalizer-modal")!;
   const closeButton = overlay.querySelector<HTMLButtonElement>(".equalizer-close")!;
   const power = overlay.querySelector<HTMLButtonElement>(".equalizer-power")!;
-  const status = overlay.querySelector<HTMLElement>(".equalizer-status span")!;
+  const statusTitle = overlay.querySelector<HTMLElement>(".equalizer-status strong")!;
+  const currentIcon = overlay.querySelector<HTMLElement>("[data-eq-current-icon]")!;
+  const currentTitle = overlay.querySelector<HTMLElement>("[data-eq-current-title]")!;
+  const currentDescription = overlay.querySelector<HTMLElement>("[data-eq-current-description]")!;
+  const preamp = overlay.querySelector<HTMLInputElement>("[data-eq-preamp]")!;
+  const preampOutput = overlay.querySelector<HTMLOutputElement>("[data-eq-preamp-output]")!;
+  const curve = overlay.querySelector<SVGPolylineElement>("[data-eq-curve]")!;
   const close = () => {
     overlay.remove();
     trigger?.setAttribute("aria-expanded", "false");
     trigger?.focus();
   };
   const syncControls = () => {
+    const preset = EQ_PRESETS[equalizerState.preset];
     power.classList.toggle("is-on", equalizerState.enabled);
     power.setAttribute("aria-checked", String(equalizerState.enabled));
-    status.textContent = equalizerState.enabled ? "Обработка включена" : "Обработка выключена";
+    statusTitle.textContent = equalizerState.enabled ? "Эквалайзер включён" : "Эквалайзер выключен";
+    currentIcon.textContent = preset.icon;
+    currentTitle.textContent = preset.label;
+    currentDescription.textContent = preset.description;
+    preamp.value = String(equalizerState.preamp);
+    preampOutput.value = formatEqGain(equalizerState.preamp);
+    curve.setAttribute("points", equalizerCurvePoints(equalizerState.gains));
     overlay.querySelectorAll<HTMLElement>("[data-eq-preset]").forEach((button) => button.classList.toggle("is-active", button.dataset.eqPreset === equalizerState.preset));
     equalizerState.gains.forEach((gain, index) => {
       const slider = overlay.querySelector<HTMLInputElement>(`[data-eq-band="${index}"]`);
       const output = overlay.querySelector<HTMLOutputElement>(`[data-eq-output="${index}"]`);
       if (slider) slider.value = String(gain);
-      if (output) output.value = `${gain > 0 ? "+" : ""}${gain} dB`;
+      if (output) output.value = formatEqGain(gain);
     });
   };
-
-  power.addEventListener("click", async () => {
-    if (!await ensureAudioGraph()) {
-      showTrackNotice("Эквалайзер недоступен для этого аудиопотока");
-      return;
-    }
-    equalizerState.enabled = !equalizerState.enabled;
+  const commitEqualizer = () => {
     applyEqualizerGains();
     saveEqualizerState();
     syncControls();
+  };
+
+  power.addEventListener("click", async () => {
+    if (!await ensureAudioGraph()) { showTrackNotice("Эквалайзер недоступен для этого аудиопотока"); return; }
+    equalizerState.enabled = !equalizerState.enabled;
+    commitEqualizer();
   });
   overlay.querySelectorAll<HTMLButtonElement>("[data-eq-preset]").forEach((button) => {
     button.addEventListener("click", async () => {
       const presetId = button.dataset.eqPreset as EqualizerPresetId;
-      if (!EQ_PRESETS[presetId] || !await ensureAudioGraph()) return;
-      equalizerState = { enabled: true, preset: presetId, gains: [...EQ_PRESETS[presetId].gains] };
-      applyEqualizerGains();
-      saveEqualizerState();
-      syncControls();
+      const preset = EQ_PRESETS[presetId];
+      if (!preset || !await ensureAudioGraph()) return;
+      equalizerState = { enabled: true, preset: presetId, preamp: preset.preamp, gains: [...preset.gains] };
+      commitEqualizer();
     });
   });
+  preamp.addEventListener("input", async () => {
+    if (!await ensureAudioGraph()) return;
+    equalizerState.preamp = Number(preamp.value);
+    equalizerState.preset = "custom";
+    equalizerState.enabled = true;
+    commitEqualizer();
+  });
   overlay.querySelectorAll<HTMLInputElement>("[data-eq-band]").forEach((slider) => {
-    slider.addEventListener("input", async () => {
+    const updateBand = async (value: number) => {
       if (!await ensureAudioGraph()) return;
-      const index = Number(slider.dataset.eqBand);
-      equalizerState.gains[index] = Number(slider.value);
+      equalizerState.gains[Number(slider.dataset.eqBand)] = value;
       equalizerState.preset = "custom";
       equalizerState.enabled = true;
-      applyEqualizerGains();
-      saveEqualizerState();
-      syncControls();
-    });
+      commitEqualizer();
+    };
+    slider.addEventListener("input", () => void updateBand(Number(slider.value)));
+    slider.addEventListener("dblclick", (event) => { event.preventDefault(); slider.value = "0"; void updateBand(0); });
+  });
+  overlay.querySelector(".equalizer-reset")?.addEventListener("click", async () => {
+    if (!await ensureAudioGraph()) return;
+    equalizerState = { enabled: true, preset: "flat", preamp: 0, gains: [...EQ_PRESETS.flat.gains] };
+    commitEqualizer();
   });
   closeButton.addEventListener("click", close);
   overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
@@ -2216,6 +2283,7 @@ function showEqualizerModal() {
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   });
+  syncControls();
   window.setTimeout(() => closeButton.focus(), 30);
 }
 
@@ -2258,7 +2326,7 @@ function renderSettings(container: HTMLElement) {
       </section>
 
       <section class="settings-card-v2 is-wide">
-        <div class="settings-section-head"><h3>Персональный звук</h3><span>6 полос</span></div>
+        <div class="settings-section-head"><h3>Персональный звук</h3><span>10 полос</span></div>
         <div class="setting-row"><div><strong>Эквалайзер</strong><small>${equalizerState.enabled ? `Активен профиль «${EQ_PRESETS[equalizerState.preset].label}»` : "Сейчас звук воспроизводится без коррекции"}</small></div><button id="openEqualizerSettings" class="profile-action-btn" type="button">Настроить</button></div>
         <div class="setting-row"><div><strong>Million Music Desktop</strong><small>Версия 1.2 · защищённое подключение к музыкальному каталогу</small></div><span class="text-xs text-emerald-300">● Онлайн</span></div>
         <div class="setting-row"><div><strong>Помочь улучшить приложение</strong><small>Опишите проблему — отчёт попадёт в админ-панель</small></div><button id="bugReportBtn" class="profile-action-btn" type="button">Сообщить о баге</button></div>
@@ -2992,12 +3060,15 @@ function loadEqualizerState() {
     const raw = localStorage.getItem(accountStorageKey(STORAGE_KEY_EQUALIZER));
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<EqualizerState>;
+      const presetId: EqualizerPresetId = parsed.preset && parsed.preset in EQ_PRESETS ? parsed.preset : "flat";
+      const preset = EQ_PRESETS[presetId];
       const gains = Array.isArray(parsed.gains) && parsed.gains.length === EQ_FREQUENCIES.length
         ? parsed.gains.map((gain) => Math.max(-12, Math.min(12, Number(gain) || 0)))
-        : [...DEFAULT_EQUALIZER.gains];
+        : [...preset.gains];
       equalizerState = {
         enabled: Boolean(parsed.enabled),
-        preset: parsed.preset && parsed.preset in EQ_PRESETS ? parsed.preset : "flat",
+        preset: presetId,
+        preamp: Number.isFinite(Number(parsed.preamp)) ? Math.max(-12, Math.min(3, Number(parsed.preamp))) : preset.preamp,
         gains,
       };
     }
