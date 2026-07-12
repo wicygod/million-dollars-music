@@ -284,6 +284,19 @@ export function getHistorySummary(): Promise<HistorySummary> {
   return apiFetch<HistorySummary>("/api/history/summary");
 }
 
+export async function addListeningTime(seconds: number): Promise<HistorySummary> {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/history/progress`, {
+    method: "POST",
+    headers: { ...apiHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ seconds: Math.max(1, Math.min(300, Math.floor(seconds))) }),
+  });
+  if (!response.ok) {
+    handleUnauthorizedResponse(response.status);
+    throw new Error(`Listening progress update failed: ${response.status}`);
+  }
+  return response.json() as Promise<HistorySummary>;
+}
+
 export interface PreparedTrack {
   track_id: number;
   status: "ready";

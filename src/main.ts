@@ -1,6 +1,7 @@
 ﻿import { LEGACY_TRACK_ID_MAP, getInitialMetadataFeed, loadHomeFeed, type MetadataFeed, type Track } from "./metadataFeedService";
 import Hls from "hls.js";
 import {
+  addListeningTime,
   API_BASE_URL,
   clearAuthToken,
   fetchCurrentUser,
@@ -18,6 +19,7 @@ import {
   searchCatalog,
   submitBugReport,
   type AuthUser,
+  type HistorySummary,
   updateAvatar,
   updateNickname,
   withAppToken,
@@ -488,6 +490,9 @@ function getCurrentDuration(track: Track): number {
 
 let lastHistoryTrackId: TrackId | null = null;
 let lastHistoryRecordedAt = 0;
+let listeningClockStartedAt: number | null = null;
+let pendingListeningMilliseconds = 0;
+let listeningSyncInFlight = false;
 const preparedTrackIds = new Set<TrackId>();
 const preparingTrackIds = new Set<TrackId>();
 
@@ -536,6 +541,44 @@ function recordActiveTrackPlay() {
       lastHistoryTrackId = null;
     });
 }
+
+function startListeningClock() {
+  if (listeningClockStartedAt === null) listeningClockStartedAt = Date.now();
+}
+
+function captureListeningElapsed() {
+  if (listeningClockStartedAt === null) return;
+  const now = Date.now();
+  pendingListeningMilliseconds += Math.max(0, now - listeningClockStartedAt);
+  listeningClockStartedAt = now;
+}
+
+function pauseListeningClock() {
+  captureListeningElapsed();
+  listeningClockStartedAt = null;
+  void flushListeningProgress();
+}
+
+async function flushListeningProgress() {
+  if (listeningClockStartedAt !== null) captureListeningElapsed();
+  if (listeningSyncInFlight || !getAuthToken()) return;
+  const seconds = Math.min(300, Math.floor(pendingListeningMilliseconds / 1000));
+  if (seconds < 1) return;
+  pendingListeningMilliseconds -= seconds * 1000;
+  listeningSyncInFlight = true;
+  try {
+    const summary = await addListeningTime(seconds);
+    applyHistorySummaryToProfile(summary);
+  } catch {
+    pendingListeningMilliseconds += seconds * 1000;
+  } finally {
+    listeningSyncInFlight = false;
+  }
+}
+
+window.setInterval(() => {
+  if (!audioEl.paused && activeAudioTrackId) void flushListeningProgress();
+}, 10_000);
 
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
@@ -1671,7 +1714,17 @@ function formatListeningTime(totalSeconds: number): string {
   const hours = Math.floor(safeSeconds / 3600);
   const minutes = Math.floor((safeSeconds % 3600) / 60);
   if (hours > 0) return `${hours} ч ${minutes} мин`;
-  return `${Math.floor(safeSeconds / 60)} мин`;
+  const totalMinutes = Math.floor(safeSeconds / 60);
+  return `${totalMinutes} ${pluralizeMinutes(totalMinutes)}`;
+}
+
+function pluralizeMinutes(count: number): string {
+  const lastTwo = Math.abs(count) % 100;
+  const last = lastTwo % 10;
+  if (lastTwo >= 11 && lastTwo <= 14) return "минут";
+  if (last === 1) return "минута";
+  if (last >= 2 && last <= 4) return "минуты";
+  return "минут";
 }
 
 function pluralizeTracks(count: number): string {
@@ -1683,6 +1736,16 @@ function pluralizeTracks(count: number): string {
   return "треков";
 }
 
+function applyHistorySummaryToProfile(summary: HistorySummary) {
+  const totalSeconds = Math.max(0, Number(summary.total_seconds) || 0);
+  const value = document.querySelector("#profileListeningTimeValue");
+  const detail = document.querySelector("#profileListeningTimeDetail");
+  const stat = document.querySelector("#profileTotalMinutesStat");
+  if (value) value.textContent = formatListeningTime(totalSeconds);
+  if (detail) detail.textContent = `${summary.total_tracks} ${pluralizeTracks(summary.total_tracks)} в истории аккаунта`;
+  if (stat) stat.textContent = String(Math.floor(totalSeconds / 60));
+}
+
 function renderProfile(container: HTMLElement) {
   const user = currentAuthUser || getStoredAuthUser();
   const likedCount = tracks.filter((t) => t.liked).length;
@@ -1690,7 +1753,6 @@ function renderProfile(container: HTMLElement) {
   const topArtists = [...new Set(listenedTracks.map((t) => t.artist))].slice(0, 4);
   const topTracks = listenedTracks.slice(0, 6);
   const hasRealStats = listenedTracks.length > 0;
-  const listenedMinutes = Math.round(listenedTracks.reduce((sum, track) => sum + track.duration, 0) / 60);
   const genreCounts = listenedTracks.reduce<Record<string, number>>((counts, track) => {
     counts[track.genre] = (counts[track.genre] || 0) + 1;
     return counts;
@@ -1719,7 +1781,7 @@ function renderProfile(container: HTMLElement) {
     <div class="profile-stats-v2">
       <div class="profile-stat-v2"><strong>${listenedTracks.length}</strong><span>Недавних треков</span></div>
       <div class="profile-stat-v2"><strong>${likedCount}</strong><span>В избранном</span></div>
-      <div class="profile-stat-v2"><strong id="profileTotalMinutesStat">${listenedMinutes}</strong><span>Минут прослушано</span></div>
+      <div class="profile-stat-v2"><strong id="profileTotalMinutesStat">0</strong><span>Минут прослушано</span></div>
       <div class="profile-stat-v2"><strong>${escapeHtml(favoriteGenre)}</strong><span>Частый жанр</span></div>
     </div>
     <div class="profile-grid-v2">
@@ -1729,7 +1791,7 @@ function renderProfile(container: HTMLElement) {
           <div class="profile-listening-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5l3.2 2"/></svg>
           </div>
-          <div><strong id="profileListeningTimeValue">${formatListeningTime(listenedMinutes * 60)}</strong><span>суммарная длительность прослушанных треков</span></div>
+          <div><strong id="profileListeningTimeValue">0 минут</strong><span>суммарная длительность прослушанных треков</span></div>
         </div>
         <div class="profile-listening-wave" aria-hidden="true">${[26, 46, 72, 38, 84, 58, 92, 44, 68, 32, 76, 52, 88, 42, 64, 30, 70, 48].map((height) => `<i style="height:${height}%"></i>`).join("")}</div>
         <p id="profileListeningTimeDetail" class="profile-listening-detail">${listenedTracks.length} ${pluralizeTracks(listenedTracks.length)} в истории аккаунта</p>
@@ -1762,16 +1824,9 @@ function renderProfile(container: HTMLElement) {
   container.querySelector("#profileSettingsBtn")?.addEventListener("click", () => switchPage("settings"));
   container.querySelector("#profileEqualizerBtn")?.addEventListener("click", showEqualizerModal);
 
-  void getHistorySummary().then((summary) => {
+  void flushListeningProgress().then(() => getHistorySummary()).then((summary) => {
     if (!container.isConnected) return;
-    const totalSeconds = Math.max(0, Number(summary.total_seconds) || 0);
-    const totalMinutes = Math.floor(totalSeconds / 60);
-    const value = container.querySelector("#profileListeningTimeValue");
-    const detail = container.querySelector("#profileListeningTimeDetail");
-    const stat = container.querySelector("#profileTotalMinutesStat");
-    if (value) value.textContent = formatListeningTime(totalSeconds);
-    if (detail) detail.textContent = `${summary.total_tracks} ${pluralizeTracks(summary.total_tracks)} в истории аккаунта`;
-    if (stat) stat.textContent = String(totalMinutes);
+    applyHistorySummaryToProfile(summary);
   }).catch(() => { /* keep the locally available fallback */ });
 
   container.querySelector<HTMLFormElement>("#profileNicknameForm")?.addEventListener("submit", async (event) => {
@@ -3479,6 +3534,7 @@ function previewActiveTrackPosition(pct: number) {
 
 audioEl.addEventListener("play", () => {
   player.playing = true;
+  startListeningClock();
   updatePlayIcon();
   recordActiveTrackPlay();
 });
@@ -3487,6 +3543,7 @@ audioEl.addEventListener("playing", recordActiveTrackPlay);
 
 audioEl.addEventListener("playing", () => {
   clearPlaybackBuffering();
+  startListeningClock();
   player.playing = true;
   updatePlayIcon();
   window.setTimeout(prepareNextQueuedTrack, 450);
@@ -3506,6 +3563,7 @@ audioEl.addEventListener("seeked", () => {
 });
 
 audioEl.addEventListener("pause", () => {
+  pauseListeningClock();
   if (audioEl.ended) return;
   clearPlaybackBuffering();
   player.playing = false;
@@ -3548,6 +3606,7 @@ audioEl.addEventListener("durationchange", () => {
 });
 
 audioEl.addEventListener("ended", () => {
+  pauseListeningClock();
   clearPlaybackBuffering();
   const track = getTrack(player.currentTrackId);
   if (player.repeat && track) {
