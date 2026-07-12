@@ -3017,8 +3017,23 @@ function updateVolumeUi() {
   volumeContainer.setAttribute("aria-valuetext", `${percent} процентов`);
 }
 
-function playLoadedAudio(token: number) {
+function playLoadedAudio(token: number, attempt = 0) {
   if (token !== playbackToken) return;
+  if (audioEl.readyState < HTMLMediaElement.HAVE_METADATA && attempt === 0) {
+    let resumed = false;
+    const resumeWhenReady = () => {
+      if (resumed) return;
+      resumed = true;
+      audioEl.removeEventListener("loadedmetadata", resumeWhenReady);
+      audioEl.removeEventListener("canplay", resumeWhenReady);
+      window.clearTimeout(readinessTimeout);
+      if (token === playbackToken) playLoadedAudio(token, 1);
+    };
+    const readinessTimeout = window.setTimeout(resumeWhenReady, 5000);
+    audioEl.addEventListener("loadedmetadata", resumeWhenReady, { once: true });
+    audioEl.addEventListener("canplay", resumeWhenReady, { once: true });
+    return;
+  }
   applyVolume();
   audioEl.play()
     .then(() => {
@@ -3030,11 +3045,15 @@ function playLoadedAudio(token: number) {
       if (token === playbackToken && getPlayerSettings().crossfade) fadePlaybackGain(1, 900);
     })
     .catch(() => {
-    if (token !== playbackToken) return;
-    clearPlaybackBuffering();
-    player.playing = false;
-    updatePlayIcon();
-    showTrackNotice("Не удалось запустить аудиопоток");
+      if (token !== playbackToken) return;
+      if (attempt < 2 && !audioEl.error) {
+        window.setTimeout(() => playLoadedAudio(token, attempt + 1), 350);
+        return;
+      }
+      clearPlaybackBuffering();
+      player.playing = false;
+      updatePlayIcon();
+      showTrackNotice("Не удалось запустить аудиопоток");
     });
 }
 
