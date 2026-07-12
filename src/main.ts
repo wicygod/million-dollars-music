@@ -494,16 +494,30 @@ let listeningClockStartedAt: number | null = null;
 let pendingListeningMilliseconds = 0;
 let listeningSyncInFlight = false;
 const preparedTrackIds = new Set<TrackId>();
-const preparingTrackIds = new Set<TrackId>();
+let activePreparationTrackId: TrackId | null = null;
+let queuedPreparationTrackId: TrackId | null = null;
 
-function prepareTrackInBackground(trackId: TrackId | null | undefined) {
-  if (!trackId || !getPlayerSettings().prefetch || !getAuthToken() || !/^\d+$/.test(String(trackId))) return;
-  if (preparedTrackIds.has(trackId) || preparingTrackIds.has(trackId) || trackId === activeAudioTrackId) return;
-  preparingTrackIds.add(trackId);
+function runQueuedTrackPreparation() {
+  const trackId = queuedPreparationTrackId;
+  if (!trackId || activePreparationTrackId || preparedTrackIds.has(trackId)) return;
+  queuedPreparationTrackId = null;
+  activePreparationTrackId = trackId;
   prepareTrackPlayback(trackId)
     .then(() => preparedTrackIds.add(trackId))
     .catch(() => undefined)
-    .finally(() => preparingTrackIds.delete(trackId));
+    .finally(() => {
+      activePreparationTrackId = null;
+      runQueuedTrackPreparation();
+    });
+}
+
+function prepareTrackInBackground(trackId: TrackId | null | undefined) {
+  if (!trackId || !getPlayerSettings().prefetch || !getAuthToken() || !/^\d+$/.test(String(trackId))) return;
+  if (preparedTrackIds.has(trackId) || activePreparationTrackId === trackId || trackId === activeAudioTrackId) return;
+  // Keep only the latest intent. Moving over a long list must not launch a
+  // separate FFmpeg process for every row the pointer crossed.
+  queuedPreparationTrackId = trackId;
+  runQueuedTrackPreparation();
 }
 
 function prepareNextQueuedTrack() {
@@ -3989,6 +4003,8 @@ document.addEventListener("pointerout", (event) => {
   if (!row || (event.relatedTarget instanceof Node && row.contains(event.relatedTarget))) return;
   if (hoverPrepareTimer !== null) window.clearTimeout(hoverPrepareTimer);
   hoverPrepareTimer = null;
+  const trackId = normalizeTrackId(row.getAttribute("data-id") || row.getAttribute("data-radio-track"));
+  if (trackId && queuedPreparationTrackId === trackId) queuedPreparationTrackId = null;
 });
 
 // ----------------------------------------------------------------
