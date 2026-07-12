@@ -4,6 +4,7 @@ import {
   addListeningTime,
   API_BASE_URL,
   clearAuthToken,
+  createStreamTicket,
   fetchCurrentUser,
   getArtist as fetchArtist,
   getArtistTracks,
@@ -477,9 +478,26 @@ function beginPlaybackBuffering(token: number) {
   }, 75000);
 }
 
-function getTrackPlaybackUrl(track: Track): string | null {
+const streamTicketCache = new Map<TrackId, { ticket: string; expiresAt: number }>();
+
+async function getTrackPlaybackUrl(track: Track): Promise<string | null> {
   if (track.audioSrc) return track.audioSrc;
   if (!track.sourceUrl) return null;
+  const trackStreamMatch = track.sourceUrl.match(/\/api\/stream\/track\/(\d+)/);
+  if (trackStreamMatch && getAuthToken()) {
+    const trackId = trackStreamMatch[1];
+    const cached = streamTicketCache.get(track.id);
+    let ticket = cached?.ticket;
+    if (!ticket || !cached || cached.expiresAt <= Date.now() + 10_000) {
+      const issued = await createStreamTicket(trackId);
+      ticket = issued.ticket;
+      streamTicketCache.set(track.id, { ticket, expiresAt: Date.now() + issued.expires_in * 1000 });
+    }
+    const url = track.sourceUrl.startsWith("/") ? `${API_BASE_URL}${track.sourceUrl}` : track.sourceUrl;
+    const parsed = new URL(url);
+    parsed.searchParams.set("stream_ticket", ticket);
+    return parsed.toString();
+  }
   let url: string;
   if (track.sourceUrl.startsWith(API_BASE_URL) || track.sourceUrl.startsWith("/api/")) {
     url = track.sourceUrl.startsWith("/") ? `${API_BASE_URL}${track.sourceUrl}` : track.sourceUrl;
@@ -3505,8 +3523,6 @@ function isHlsPlaybackUrl(sourceUrl: string) {
 }
 
 function startAudio(track: Track) {
-  const sourceUrl = getTrackPlaybackUrl(track);
-  if (!sourceUrl) return;
   if (equalizerState.enabled) void ensureAudioGraph();
 
   if (activeAudioTrackId === track.id && (audioEl.src || hlsPlayer)) {
@@ -3527,21 +3543,29 @@ function startAudio(track: Track) {
     if (token === playbackToken && activeAudioTrackId === track.id && player.playing) recordActiveTrackPlay();
   }, 2000);
 
-  if (Hls.isSupported() && isHlsPlaybackUrl(sourceUrl)) {
-    hlsPlayer = new Hls();
-    hlsPlayer.loadSource(sourceUrl);
-    hlsPlayer.attachMedia(audioEl);
-    hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => playLoadedAudio(token));
-    hlsPlayer.on(Hls.Events.ERROR, (_event, data) => {
-      if (token !== playbackToken || !data.fatal) return;
-      hlsPlayer?.destroy();
-      hlsPlayer = null;
-      attachNativeAudio(sourceUrl, token, 0);
-    });
-    return;
-  }
-
-  attachNativeAudio(sourceUrl, token, 0);
+  void getTrackPlaybackUrl(track).then((sourceUrl) => {
+    if (!sourceUrl || token !== playbackToken || activeAudioTrackId !== track.id || !player.playing) return;
+    if (Hls.isSupported() && isHlsPlaybackUrl(sourceUrl)) {
+      hlsPlayer = new Hls();
+      hlsPlayer.loadSource(sourceUrl);
+      hlsPlayer.attachMedia(audioEl);
+      hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => playLoadedAudio(token));
+      hlsPlayer.on(Hls.Events.ERROR, (_event, data) => {
+        if (token !== playbackToken || !data.fatal) return;
+        hlsPlayer?.destroy();
+        hlsPlayer = null;
+        attachNativeAudio(sourceUrl, token, 0);
+      });
+      return;
+    }
+    attachNativeAudio(sourceUrl, token, 0);
+  }).catch(() => {
+    if (token !== playbackToken) return;
+    clearPlaybackBuffering();
+    player.playing = false;
+    updatePlayIcon();
+    showTrackNotice("Не удалось получить доступ к аудиопотоку");
+  });
 }
 
 function stopAudio() {

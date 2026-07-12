@@ -304,6 +304,23 @@ export interface PreparedTrack {
   size_bytes: number;
 }
 
+export interface StreamTicket {
+  ticket: string;
+  expires_in: number;
+}
+
+export async function createStreamTicket(trackId: string | number): Promise<StreamTicket> {
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/stream/track/${encodeURIComponent(String(trackId))}/ticket`,
+    { method: "POST", headers: apiHeaders() },
+  );
+  if (!response.ok) {
+    handleUnauthorizedResponse(response.status);
+    throw new Error(`Stream ticket request failed: ${response.status}`);
+  }
+  return response.json() as Promise<StreamTicket>;
+}
+
 export async function prepareTrackPlayback(trackId: string | number): Promise<PreparedTrack> {
   const response = await fetchWithTimeout(
     `${API_BASE_URL}/api/stream/track/${encodeURIComponent(String(trackId))}/prepare`,
