@@ -2722,7 +2722,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
   const mapSearchResults = (backendTracks: Awaited<ReturnType<typeof searchCatalog>>) =>
     mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
   const pollHydratedResults = (attempt: number, previousCount: number, stableCount = 0) => {
-    if (attempt > 16 || previousCount >= searchTargetLimit || stableCount >= 5) return;
+    if (attempt > 30 || previousCount >= searchTargetLimit || stableCount >= 15) return;
     window.setTimeout(() => {
       if (!isCurrentSearch()) return;
       searchCatalog(query, searchTargetLimit)
@@ -2737,7 +2737,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
           }
         })
         .catch(() => {});
-    }, attempt < 5 ? 2000 : 4000);
+    }, attempt < 7 ? 2000 : 4000);
   };
 
   container.innerHTML = `
