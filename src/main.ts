@@ -166,6 +166,7 @@ let activeAudioTrackId: TrackId | null = null;
 let playbackToken = 0;
 let playbackWatchdog: number | null = null;
 let currentStreamOffset = 0;
+let pendingSeekCleanup: (() => void) | null = null;
 
 function getTrack(id: TrackId | null | undefined): Track | undefined {
   if (!id) return undefined;
@@ -3117,6 +3118,8 @@ function startAudio(track: Track) {
 
 function stopAudio() {
   playbackToken++;
+  pendingSeekCleanup?.();
+  pendingSeekCleanup = null;
   clearPlaybackBuffering();
   if (fadeTimer !== null) {
     window.clearInterval(fadeTimer);
@@ -3143,30 +3146,56 @@ function seekActiveTrack(seconds: number) {
   updateAllTimelines();
 
   if (activeAudioTrackId !== track.id) return;
-  const sourceUrl = getTrackPlaybackUrl(track);
-  if (!sourceUrl) return;
-
   const shouldResume = player.playing;
-  const nativeTarget = Math.max(0, target - currentStreamOffset);
-  if (audioEl.readyState >= HTMLMediaElement.HAVE_METADATA && Number.isFinite(audioEl.duration)) {
+  pendingSeekCleanup?.();
+  pendingSeekCleanup = null;
+
+  const applyNativeSeek = () => {
+    if (activeAudioTrackId !== track.id) return false;
+    if (audioEl.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return false;
+    const nativeTarget = Math.max(0, target - currentStreamOffset);
     try {
       audioEl.currentTime = nativeTarget;
       player.playing = shouldResume;
       if (shouldResume) beginPlaybackBuffering(playbackToken);
-      return;
+      return true;
     } catch {
-      // Some providers expose a non-seekable stream. The fresh-stream fallback
-      // below keeps those tracks seekable as well.
+      return false;
     }
-  }
+  };
 
-  const token = ++playbackToken;
-  currentStreamOffset = target;
-  audioEl.pause();
-  player.playing = shouldResume;
-  if (shouldResume) beginPlaybackBuffering(token);
-  attachNativeAudio(sourceUrl, token, target, shouldResume);
-  if (!shouldResume) updatePlayIcon();
+  if (applyNativeSeek()) return;
+
+  // A seek can happen immediately after Play, before WebView2 has parsed the
+  // MP3 metadata. Keep the requested position and apply it to the original
+  // stream as soon as it becomes seekable instead of replacing its src.
+  const expectedToken = playbackToken;
+  let settled = false;
+  const cleanup = () => {
+    if (settled) return;
+    settled = true;
+    audioEl.removeEventListener("canplay", applyWhenReady);
+    audioEl.removeEventListener("playing", applyWhenReady);
+    window.clearTimeout(timeout);
+    if (pendingSeekCleanup === cleanup) pendingSeekCleanup = null;
+  };
+  const applyWhenReady = () => {
+    if (expectedToken !== playbackToken || activeAudioTrackId !== track.id) {
+      cleanup();
+      return;
+    }
+    if (applyNativeSeek()) cleanup();
+  };
+  const timeout = window.setTimeout(() => {
+    if (!settled && expectedToken === playbackToken) showTrackNotice("Трек ещё загружается — попробуйте перемотать снова");
+    cleanup();
+  }, 20_000);
+  pendingSeekCleanup = cleanup;
+  audioEl.addEventListener("canplay", applyWhenReady);
+  audioEl.addEventListener("playing", applyWhenReady);
+
+  // The event may have fired between the initial check and listener setup.
+  applyWhenReady();
 }
 
 function previewActiveTrackPosition(pct: number) {
