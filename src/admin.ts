@@ -1,4 +1,4 @@
-import { API_BASE_URL, adminHeaders } from "./api/musicApi";
+import { API_BASE_URL, adminHeaders, getAdminApiKey, setAdminSessionKey } from "./api/musicApi";
 
 interface AdminTrack {
   id: number;
@@ -53,6 +53,56 @@ interface UserDetail {
   history: Array<{ track: AdminTrack; played_at: string }>;
 }
 
+interface CatalogMetrics {
+  tracks: number;
+  artists: number;
+  playable_tracks: number;
+  needs_review: number;
+  missing_covers: number;
+  duration_seconds: number;
+  sources: Array<{ name: string; tracks: number }>;
+}
+
+interface CommunityMetrics {
+  users: number;
+  new_users_7d: number;
+  subscribed_users: number;
+  favorites: number;
+  playlists: number;
+  playlist_tracks: number;
+}
+
+interface ActivityMetrics {
+  window_seconds: number;
+  total: number;
+  streams: number;
+  searches: number;
+  admin_actions: number;
+  alerts: number;
+  recent_streams: LogEvent[];
+  recent_alerts: LogEvent[];
+}
+
+interface AudioCacheMetrics {
+  directory: string;
+  files: number;
+  building: number;
+  bytes: number;
+  max_bytes: number;
+  usage_percent: number;
+  disk_free_bytes: number;
+  stale_files_24h: number;
+  oldest_at: string | null;
+  newest_at: string | null;
+}
+
+interface AdminOverview {
+  catalog: CatalogMetrics;
+  community: CommunityMetrics;
+  activity: ActivityMetrics;
+  audio_cache: AudioCacheMetrics;
+}
+
 const cpuValue = document.getElementById("cpuValue")!;
 const ramValue = document.getElementById("ramValue")!;
 const ramBytes = document.getElementById("ramBytes")!;
@@ -73,6 +123,39 @@ const topTracks = document.getElementById("topTracks")!;
 const usersTable = document.getElementById("usersTable")!;
 const userDetail = document.getElementById("userDetail")!;
 const toast = document.getElementById("toast")!;
+const adminAccessGate = document.getElementById("adminAccessGate")!;
+const adminAccessForm = document.getElementById("adminAccessForm") as HTMLFormElement;
+const adminAccessKey = document.getElementById("adminAccessKey") as HTMLInputElement;
+const adminAccessError = document.getElementById("adminAccessError")!;
+const lastSync = document.getElementById("lastSync")!;
+const refreshAllButton = document.getElementById("refreshAll") as HTMLButtonElement;
+const catalogHealth = document.getElementById("catalogHealth")!;
+const catalogTracks = document.getElementById("catalogTracks")!;
+const catalogPlayable = document.getElementById("catalogPlayable")!;
+const catalogArtists = document.getElementById("catalogArtists")!;
+const catalogReview = document.getElementById("catalogReview")!;
+const catalogCovers = document.getElementById("catalogCovers")!;
+const catalogHours = document.getElementById("catalogHours")!;
+const sourceMix = document.getElementById("sourceMix")!;
+const communityMetrics = document.getElementById("communityMetrics")!;
+const cacheState = document.getElementById("cacheState")!;
+const cacheRing = document.getElementById("cacheRing")!;
+const cachePercent = document.getElementById("cachePercent")!;
+const cacheBytes = document.getElementById("cacheBytes")!;
+const cacheFiles = document.getElementById("cacheFiles")!;
+const cacheBuilding = document.getElementById("cacheBuilding")!;
+const cacheDiskFree = document.getElementById("cacheDiskFree")!;
+const cacheOldest = document.getElementById("cacheOldest")!;
+const cacheStale = document.getElementById("cacheStale")!;
+const cacheMaxAge = document.getElementById("cacheMaxAge") as HTMLSelectElement;
+const pruneCacheButton = document.getElementById("pruneCache") as HTMLButtonElement;
+const activityTotal = document.getElementById("activityTotal")!;
+const activityStreams = document.getElementById("activityStreams")!;
+const activitySearches = document.getElementById("activitySearches")!;
+const activityAdmin = document.getElementById("activityAdmin")!;
+const activityAlerts = document.getElementById("activityAlerts")!;
+const recentStreams = document.getElementById("recentStreams")!;
+const recentAlerts = document.getElementById("recentAlerts")!;
 const cpuHistory: number[] = [];
 
 let currentUsers: AdminUser[] = [];
@@ -90,7 +173,21 @@ document.querySelectorAll<HTMLButtonElement>(".nav-item").forEach((button) => {
 
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0 MB";
-  return `${Math.round(value / 1024 / 1024)} MB`;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const unitIndex = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / (1024 ** unitIndex);
+  return `${amount >= 10 || unitIndex < 2 ? Math.round(amount) : amount.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatCount(value: number): string {
+  return new Intl.NumberFormat("en", { notation: value >= 10_000 ? "compact" : "standard" }).format(value || 0);
+}
+
+function formatDate(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function formatUptime(seconds: number): string {
@@ -162,6 +259,69 @@ function renderStats(stats: AdminStats): void {
   while (cpuHistory.length > 32) cpuHistory.shift();
   renderSparkline();
   renderTopTracks(stats.top_tracks || []);
+  lastSync.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function renderActivityFeed(target: HTMLElement, events: LogEvent[], emptyMessage: string): void {
+  target.innerHTML = events.length ? events.map((event) => `
+    <div class="activity-row ${escapeHtml(event.kind)}">
+      <span class="activity-dot"></span>
+      <div>
+        <strong>${escapeHtml(event.message)}</strong>
+        <p>${escapeHtml(event.ts)} · ${escapeHtml(event.ip || "unknown")}</p>
+      </div>
+    </div>
+  `).join("") : `<p class="empty-state">${escapeHtml(emptyMessage)}</p>`;
+}
+
+function renderOverview(payload: AdminOverview): void {
+  const { catalog, community, activity, audio_cache: cache } = payload;
+  const playablePercent = catalog.tracks > 0 ? (catalog.playable_tracks / catalog.tracks) * 100 : 0;
+  catalogTracks.textContent = formatCount(catalog.tracks);
+  catalogPlayable.textContent = `${playablePercent.toFixed(1)}%`;
+  catalogArtists.textContent = formatCount(catalog.artists);
+  catalogReview.textContent = formatCount(catalog.needs_review);
+  catalogCovers.textContent = formatCount(catalog.missing_covers);
+  catalogHours.textContent = `${Math.round((catalog.duration_seconds || 0) / 3600)}h`;
+  const healthOk = catalog.tracks > 0 && playablePercent >= 90 && catalog.needs_review <= Math.max(5, catalog.tracks * 0.05);
+  catalogHealth.textContent = healthOk ? "Healthy" : catalog.tracks > 0 ? "Attention" : "Empty";
+  catalogHealth.classList.toggle("ok", healthOk);
+
+  const largestSource = Math.max(1, ...catalog.sources.map((source) => source.tracks));
+  sourceMix.innerHTML = catalog.sources.length ? catalog.sources.map((source) => `
+    <div class="source-row">
+      <span>${escapeHtml(source.name)}</span>
+      <div><i style="width:${Math.max(4, (source.tracks / largestSource) * 100).toFixed(1)}%"></i></div>
+      <strong>${formatCount(source.tracks)}</strong>
+    </div>
+  `).join("") : `<span class="muted">No source data</span>`;
+
+  communityMetrics.innerHTML = [
+    ["Total users", community.users],
+    ["New / 7d", community.new_users_7d],
+    ["Subscribed", community.subscribed_users],
+    ["Favorites", community.favorites],
+  ].map(([label, value]) => `<span><strong>${formatCount(Number(value))}</strong>${label}</span>`).join("");
+
+  const cacheUsage = Math.max(0, Math.min(100, cache.usage_percent || 0));
+  cacheRing.style.setProperty("--cache-progress", `${cacheUsage * 3.6}deg`);
+  cachePercent.textContent = `${cacheUsage.toFixed(0)}%`;
+  cacheBytes.textContent = `${formatBytes(cache.bytes)} / ${formatBytes(cache.max_bytes)}`;
+  cacheFiles.textContent = formatCount(cache.files);
+  cacheBuilding.textContent = formatCount(cache.building);
+  cacheDiskFree.textContent = formatBytes(cache.disk_free_bytes);
+  cacheOldest.textContent = formatDate(cache.oldest_at);
+  cacheStale.textContent = formatCount(cache.stale_files_24h);
+  cacheState.textContent = cache.building > 0 ? "Building" : cacheUsage >= 90 ? "Near limit" : "Ready";
+  cacheState.classList.toggle("ok", cache.building === 0 && cacheUsage < 90);
+
+  activityTotal.textContent = `${formatCount(activity.total)} events`;
+  activityStreams.textContent = formatCount(activity.streams);
+  activitySearches.textContent = formatCount(activity.searches);
+  activityAdmin.textContent = formatCount(activity.admin_actions);
+  activityAlerts.textContent = formatCount(activity.alerts);
+  renderActivityFeed(recentStreams, activity.recent_streams || [], "No stream starts in this window.");
+  renderActivityFeed(recentAlerts, activity.recent_alerts || [], "No alerts in this window.");
 }
 
 function renderTopTracks(items: TopTrack[]): void {
@@ -377,9 +537,81 @@ async function refreshUsers(): Promise<void> {
   }
 }
 
-void refreshStats();
-void refreshLogs();
-void refreshUsers();
-window.setInterval(() => void refreshStats(), 2000);
-window.setInterval(() => void refreshLogs(), 1500);
-window.setInterval(() => void refreshUsers(), 7000);
+async function refreshOverview(): Promise<void> {
+  try {
+    renderOverview(await adminFetch<AdminOverview>("/api/admin/overview"));
+  } catch {
+    setBackendStatus(false);
+  }
+}
+
+async function refreshEverything(): Promise<void> {
+  refreshAllButton.disabled = true;
+  refreshAllButton.classList.add("is-loading");
+  try {
+    await Promise.all([refreshStats(), refreshLogs(), refreshUsers(), refreshOverview()]);
+  } finally {
+    refreshAllButton.disabled = false;
+    refreshAllButton.classList.remove("is-loading");
+  }
+}
+
+refreshAllButton.addEventListener("click", () => void refreshEverything());
+pruneCacheButton.addEventListener("click", async () => {
+  const maxAgeHours = Number(cacheMaxAge.value || 24);
+  if (!window.confirm(`Remove completed audio files unused for more than ${maxAgeHours} hours?`)) return;
+  pruneCacheButton.disabled = true;
+  try {
+    const payload = await adminSend<{ removed_files: number; freed_bytes: number; audio_cache: AudioCacheMetrics }>(
+      "/api/admin/cache/audio/prune",
+      "POST",
+      { max_age_hours: maxAgeHours },
+    );
+    showToast(`Removed ${payload.removed_files} files · freed ${formatBytes(payload.freed_bytes)}`);
+    await refreshOverview();
+  } catch {
+    showToast("Could not prune audio cache");
+  } finally {
+    pruneCacheButton.disabled = false;
+  }
+});
+
+let adminPollingStarted = false;
+
+function startAdminPolling(): void {
+  if (adminPollingStarted) return;
+  adminPollingStarted = true;
+  void refreshEverything();
+  window.setInterval(() => void refreshStats(), 2000);
+  window.setInterval(() => void refreshLogs(), 1500);
+  window.setInterval(() => void refreshUsers(), 7000);
+  window.setInterval(() => void refreshOverview(), 8000);
+}
+
+adminAccessForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const key = adminAccessKey.value.trim();
+  if (!key) return;
+  adminAccessError.textContent = "Checking access…";
+  setAdminSessionKey(key);
+  try {
+    const overview = await adminFetch<AdminOverview>("/api/admin/overview");
+    renderOverview(overview);
+    adminAccessGate.hidden = true;
+    adminAccessKey.value = "";
+    adminAccessError.textContent = "";
+    startAdminPolling();
+  } catch {
+    setAdminSessionKey("");
+    adminAccessError.textContent = "Access denied. Check the admin key.";
+    adminAccessKey.select();
+  }
+});
+
+if (getAdminApiKey()) {
+  adminAccessGate.hidden = true;
+  startAdminPolling();
+} else {
+  adminAccessGate.hidden = false;
+  window.setTimeout(() => adminAccessKey.focus(), 40);
+}

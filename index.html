@@ -16,6 +16,10 @@
     <!-- ===== ШАПКА ===== -->
     <header class="h-16 w-full shrink-0 border-b border-white/10 flex items-center justify-center gap-4 px-4" aria-label="Основная навигация">
 
+      <button id="hdrEqualizer" class="hdr-btn hdr-equalizer group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90" type="button" aria-label="Открыть эквалайзер" aria-haspopup="dialog" aria-expanded="false">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h4m4 0h8M8 3v6M4 12h10m4 0h2m-6-3v6M4 18h2m4 0h10m-14-3v6"/></svg>
+        <span class="tooltip">Эквалайзер</span>
+      </button>
       <button id="hdrHome" class="hdr-btn group relative w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shrink-0 cursor-pointer text-white/70 active:scale-90" type="button" aria-label="Главная">
         <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
         <span class="tooltip">Главная</span>
@@ -66,29 +70,12 @@
           <span class="sidebar-brand-mark" aria-hidden="true">M</span>
           <span class="sidebar-brand-copy"><strong>MILLION</strong><span>personal sound</span></span>
         </div>
-        <div class="playlist-header flex items-center justify-between mb-3">
-          <div class="playlist-heading text-xs font-semibold text-white/40 uppercase tracking-widest">Плейлисты</div>
-          <button id="createPlaylistBtn" class="w-7 h-7 rounded-full text-white/45 hover:text-white hover:bg-white/5 border border-white/5 cursor-pointer transition-all duration-300 active:scale-95" type="button" title="Создать плейлист" aria-label="Создать плейлист" aria-expanded="false" aria-controls="createPlaylistForm">
-            <span class="text-lg leading-none">+</span>
-          </button>
-        </div>
-        <div class="space-y-1 text-sm text-white/50" id="sidebarPlaylistContainer">
-          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 text-white cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="focus">🎧 Focus Flow</div>
-          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="late">🌙 Late Nights</div>
-          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="energy">⚡ Energy Boost</div>
-          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="chill">🧘 Chill Vibes</div>
-          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="indie">🎵 Indie Mix</div>
-          <div class="playlist-item flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" data-playlist="piano">🎹 Piano</div>
-        </div>
-        <form id="createPlaylistForm" class="hidden mt-2 rounded-xl bg-white/[0.03] border border-white/10 p-2" aria-label="Новый плейлист">
-          <label class="sr-only" for="newPlaylistName">Название плейлиста</label>
-          <input id="newPlaylistName" type="text" maxlength="40" autocomplete="off" placeholder="Название плейлиста" class="w-full bg-transparent text-sm text-white/80 placeholder-white/30 outline-none border-none px-2 py-1.5" />
-          <div class="flex items-center gap-2 mt-2">
-            <button id="savePlaylistBtn" type="submit" class="flex-1 px-3 py-1.5 rounded-lg bg-white text-black text-xs font-semibold hover:scale-[1.02] transition-all duration-300 active:scale-95 cursor-pointer">Создать</button>
-            <button id="cancelPlaylistBtn" type="button" class="px-3 py-1.5 rounded-lg bg-white/5 text-white/60 text-xs hover:text-white transition-all duration-300 cursor-pointer">Отмена</button>
-          </div>
-          <p id="playlistFormError" class="hidden text-[11px] text-red-300 mt-2 px-2" role="alert"></p>
-        </form>
+        <div class="sidebar-section-label">Библиотека</div>
+        <nav class="sidebar-library" aria-label="Библиотека">
+          <button type="button" data-sidebar-page="home"><span aria-hidden="true">◷</span><span>Недавнее</span></button>
+          <button type="button" data-sidebar-page="explore"><span aria-hidden="true">↗</span><span>Популярное</span></button>
+          <button type="button" data-sidebar-page="radio"><span aria-hidden="true">◉</span><span>Радиоволна</span></button>
+        </nav>
         <div class="mt-auto pt-6 text-sm text-white/30">
           <div id="likedTracks" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" role="button" tabindex="0" aria-label="Любимые треки">
             <svg class="w-5 h-5 shrink-0 text-[#ff4d4d]" fill="currentColor" stroke="#ff4d4d" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.08C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
@@ -113,9 +100,6 @@
           </button>
           <button id="likeBtn" class="text-white/30 hover:text-red-400 transition-all duration-300 shrink-0 cursor-pointer active:scale-90" type="button" aria-label="Добавить текущий трек в избранное" aria-pressed="false">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
-          </button>
-          <button id="addToPlaylistBtn" class="text-white/30 hover:text-indigo-400 transition-all duration-300 shrink-0 cursor-pointer active:scale-90 relative" type="button" title="Добавить в плейлист" aria-label="Добавить текущий трек в плейлист">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
           </button>
         </div>
         <div class="flex-1 flex flex-col items-center justify-center gap-1 min-w-0">

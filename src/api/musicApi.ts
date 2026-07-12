@@ -6,11 +6,12 @@ export const ADMIN_API_KEY = import.meta.env.VITE_MUSIC_ADMIN_API_KEY?.trim() ||
 const DEVICE_ID_STORAGE_KEY = "mm_device_id";
 const AUTH_TOKEN_STORAGE_KEY = "mm_auth_token";
 const AUTH_USER_STORAGE_KEY = "mm_auth_user";
+const ADMIN_SESSION_KEY = "mm_admin_session_key";
 const API_REQUEST_TIMEOUT_MS = 12000;
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = API_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } finally {
@@ -107,14 +108,25 @@ export function withAppToken(url: string): string {
 }
 
 export function adminHeaders(): HeadersInit {
-  if (!ADMIN_API_KEY) {
-    throw new Error("VITE_MUSIC_ADMIN_API_KEY is required for the admin panel");
+  const adminKey = getAdminApiKey();
+  if (!adminKey) {
+    throw new Error("Admin API key is required for the admin panel");
   }
   return {
     Accept: "application/json",
     "X-App-Token": APP_AUTH_TOKEN,
-    "X-Admin-Key": ADMIN_API_KEY,
+    "X-Admin-Key": adminKey,
   };
+}
+
+export function getAdminApiKey(): string {
+  return ADMIN_API_KEY || sessionStorage.getItem(ADMIN_SESSION_KEY)?.trim() || "";
+}
+
+export function setAdminSessionKey(value: string): void {
+  const clean = value.trim();
+  if (clean) sessionStorage.setItem(ADMIN_SESSION_KEY, clean);
+  else sessionStorage.removeItem(ADMIN_SESSION_KEY);
 }
 
 async function apiFetch<T>(path: string): Promise<T> {
@@ -261,6 +273,26 @@ export async function recordTrackPlay(trackId: string | number): Promise<Backend
     throw new Error(`Backend request failed: ${response.status}`);
   }
   return response.json() as Promise<BackendTrack>;
+}
+
+export interface PreparedTrack {
+  track_id: number;
+  status: "ready";
+  cache_hit: boolean;
+  size_bytes: number;
+}
+
+export async function prepareTrackPlayback(trackId: string | number): Promise<PreparedTrack> {
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/stream/track/${encodeURIComponent(String(trackId))}/prepare`,
+    { method: "POST", headers: apiHeaders() },
+    90_000,
+  );
+  if (!response.ok) {
+    handleUnauthorizedResponse(response.status);
+    throw new Error(`Track preparation failed: ${response.status}`);
+  }
+  return response.json() as Promise<PreparedTrack>;
 }
 
 export async function submitBugReport(text: string): Promise<{ ok: boolean; message: string }> {

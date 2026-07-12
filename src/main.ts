@@ -11,6 +11,7 @@ import {
   getTrack as fetchTrack,
   loginAccount,
   mapBackendTrack,
+  prepareTrackPlayback,
   recordTrackPlay,
   registerAccount,
   searchCatalog,
@@ -36,9 +37,42 @@ type PlayerSettings = {
   scale: string;
   normalize: boolean;
   crossfade: boolean;
+  autoplay: boolean;
+  prefetch: boolean;
+  compact: boolean;
+  reduceMotion: boolean;
+  accent: string;
 };
 
-const DEFAULT_SETTINGS: PlayerSettings = { theme: true, scale: "100", normalize: false, crossfade: false };
+const DEFAULT_SETTINGS: PlayerSettings = {
+  theme: true,
+  scale: "100",
+  normalize: false,
+  crossfade: false,
+  autoplay: true,
+  prefetch: true,
+  compact: false,
+  reduceMotion: false,
+  accent: "violet",
+};
+
+type EqualizerPresetId = "flat" | "bass" | "vocal" | "electronic" | "rock" | "night" | "custom";
+type EqualizerState = { enabled: boolean; preset: EqualizerPresetId; gains: number[] };
+type ProfilePreferences = { bio: string; mood: string; weeklyGoal: number };
+
+const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000] as const;
+const EQ_PRESETS: Record<EqualizerPresetId, { label: string; gains: number[] }> = {
+  flat: { label: "Ровный", gains: [0, 0, 0, 0, 0, 0] },
+  bass: { label: "Больше баса", gains: [8, 5, 2, 0, -1, -2] },
+  vocal: { label: "Вокал", gains: [-2, -1, 1, 5, 3, 0] },
+  electronic: { label: "Электроника", gains: [5, 3, 0, -1, 3, 6] },
+  rock: { label: "Рок", gains: [4, 2, -1, 1, 4, 5] },
+  night: { label: "Ночной", gains: [3, 2, 0, -1, -3, -4] },
+  custom: { label: "Свой", gains: [0, 0, 0, 0, 0, 0] },
+};
+const DEFAULT_EQUALIZER: EqualizerState = { enabled: false, preset: "flat", gains: [...EQ_PRESETS.flat.gains] };
+const DEFAULT_PROFILE_PREFERENCES: ProfilePreferences = { bio: "Музыка — мой способ настроиться на день.", mood: "Открываю новое", weeklyGoal: 180 };
+const ACCENT_COLORS: Record<string, string> = { violet: "#8b5cf6", rose: "#ec4899", cyan: "#06b6d4", lime: "#84cc16" };
 const PRIORITY_ARTISTS = ["lil peep", "9 mice", "kai angel", "viperr", "pharaoh", "темный принц", "тёмный принц", "fortuna812", "face", "cupsize", "madkid", "снялцепи"];
 const POPULAR_INITIAL_RENDER = 24;
 const POPULAR_RENDER_STEP = 24;
@@ -79,7 +113,7 @@ const radioStations = [
   { id: "chillout", name: "Чилаут", gradient: "from-teal-500 to-green-700", desc: "Эмбиент, даунтемпо, релакс", mood: "relax" },
   { id: "energy", name: "Энергия", gradient: "from-orange-500 to-red-600", desc: "Рок, EDM, мотивирующие треки", mood: "active" },
   { id: "morning", name: "Утренний микс", gradient: "from-purple-600 to-pink-700", desc: "Поп, инди, позитивные треки", mood: "happy" },
-  { id: "road", name: "В дорогу", gradient: "from-sky-500 to-indigo-700", desc: "Плейлисты для путешествий", mood: "adventure" },
+  { id: "road", name: "В дорогу", gradient: "from-sky-500 to-indigo-700", desc: "Музыка для путешествий", mood: "adventure" },
   { id: "evening", name: "Вечерний лайф", gradient: "from-rose-500 to-fuchsia-700", desc: "R&B, соул, джаз", mood: "romantic" },
 ];
 
@@ -161,12 +195,66 @@ function getOrCreateAudioElement(): HTMLAudioElement {
 }
 
 const audioEl = getOrCreateAudioElement();
+audioEl.crossOrigin = "anonymous";
 let hlsPlayer: Hls | null = null;
 let activeAudioTrackId: TrackId | null = null;
 let playbackToken = 0;
 let playbackWatchdog: number | null = null;
 let currentStreamOffset = 0;
 let pendingSeekCleanup: (() => void) | null = null;
+let equalizerState: EqualizerState = { ...DEFAULT_EQUALIZER, gains: [...DEFAULT_EQUALIZER.gains] };
+let audioContext: AudioContext | null = null;
+let audioSourceNode: MediaElementAudioSourceNode | null = null;
+let equalizerFilters: BiquadFilterNode[] = [];
+let equalizerPreamp: GainNode | null = null;
+let equalizerLimiter: DynamicsCompressorNode | null = null;
+
+function applyEqualizerGains() {
+  const maximumBoost = equalizerState.enabled ? Math.max(0, ...equalizerState.gains) : 0;
+  if (equalizerPreamp) {
+    equalizerPreamp.gain.setTargetAtTime(Math.pow(10, -maximumBoost / 20), audioContext?.currentTime || 0, 0.02);
+  }
+  equalizerFilters.forEach((filter, index) => {
+    const gain = equalizerState.enabled ? Number(equalizerState.gains[index] || 0) : 0;
+    filter.gain.setTargetAtTime(gain, audioContext?.currentTime || 0, 0.015);
+  });
+}
+
+async function ensureAudioGraph(): Promise<boolean> {
+  try {
+    if (!audioContext) {
+      audioContext = new AudioContext();
+      audioSourceNode = audioContext.createMediaElementSource(audioEl);
+      equalizerPreamp = audioContext.createGain();
+      equalizerLimiter = audioContext.createDynamicsCompressor();
+      equalizerLimiter.threshold.value = -4;
+      equalizerLimiter.knee.value = 8;
+      equalizerLimiter.ratio.value = 5;
+      equalizerLimiter.attack.value = 0.004;
+      equalizerLimiter.release.value = 0.18;
+      equalizerFilters = EQ_FREQUENCIES.map((frequency, index) => {
+        const filter = audioContext!.createBiquadFilter();
+        filter.type = index === 0 ? "lowshelf" : index === EQ_FREQUENCIES.length - 1 ? "highshelf" : "peaking";
+        filter.frequency.value = frequency;
+        filter.Q.value = index === 0 || index === EQ_FREQUENCIES.length - 1 ? 0.7 : 1.05;
+        return filter;
+      });
+      audioSourceNode.connect(equalizerPreamp);
+      let previous: AudioNode = equalizerPreamp;
+      equalizerFilters.forEach((filter) => {
+        previous.connect(filter);
+        previous = filter;
+      });
+      previous.connect(equalizerLimiter);
+      equalizerLimiter.connect(audioContext.destination);
+      applyEqualizerGains();
+    }
+    if (audioContext.state === "suspended") await audioContext.resume();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function getTrack(id: TrackId | null | undefined): Track | undefined {
   if (!id) return undefined;
@@ -401,6 +489,24 @@ function getCurrentDuration(track: Track): number {
 
 let lastHistoryTrackId: TrackId | null = null;
 let lastHistoryRecordedAt = 0;
+const preparedTrackIds = new Set<TrackId>();
+const preparingTrackIds = new Set<TrackId>();
+
+function prepareTrackInBackground(trackId: TrackId | null | undefined) {
+  if (!trackId || !getPlayerSettings().prefetch || !getAuthToken() || !/^\d+$/.test(String(trackId))) return;
+  if (preparedTrackIds.has(trackId) || preparingTrackIds.has(trackId) || trackId === activeAudioTrackId) return;
+  preparingTrackIds.add(trackId);
+  prepareTrackPlayback(trackId)
+    .then(() => preparedTrackIds.add(trackId))
+    .catch(() => undefined)
+    .finally(() => preparingTrackIds.delete(trackId));
+}
+
+function prepareNextQueuedTrack() {
+  if (!getPlayerSettings().prefetch || player.shuffle || player.queue.length === 0) return;
+  const currentIndex = Math.max(0, player.queueIndex);
+  prepareTrackInBackground(player.queue[currentIndex + 1]);
+}
 
 function pushRecentTrack(track: Track) {
   metadataFeed = {
@@ -782,6 +888,7 @@ function ensureAuthOverlay(): HTMLElement {
         ? await registerAccount(login, nickname || login, password)
         : await loginAccount(login, password);
       currentAuthUser = payload.user;
+      hydrateAccountState(true);
       if (mode === "register") resetPlayerForNewAccount();
       hideAuthScreen();
       bootstrapAuthenticatedApp();
@@ -836,13 +943,16 @@ function bootstrapAuthenticatedApp() {
   const restoredFromCache = Boolean(cachedUser);
   if (cachedUser) {
     currentAuthUser = cachedUser;
+    hydrateAccountState();
     hideAuthScreen();
     switchPage(currentPage || "home", currentPageParam);
     refreshMetadataFeed();
   }
   fetchCurrentUser()
     .then((user) => {
+      const previousUserId = currentAuthUser?.id;
       currentAuthUser = user;
+      if (previousUserId !== user.id) hydrateAccountState(true);
       hideAuthScreen();
       if (!restoredFromCache) {
         switchPage(currentPage || "home", currentPageParam);
@@ -1159,7 +1269,7 @@ function renderExplore(container: HTMLElement) {
   container.innerHTML = `
     <section class="smart-hero">
       <div>
-        <p class="section-kicker">Умные плейлисты дня</p>
+        <p class="section-kicker">Персональные миксы дня</p>
         <h2>Живая подборка без случайного мусора</h2>
         <p>Миксы собираются из чистой музыкальной базы, приоритетных артистов и вашей реальной истории прослушиваний.</p>
       </div>
@@ -1243,30 +1353,26 @@ function renderExplore(container: HTMLElement) {
 }
 
 function getQuickSection(id: string) {
-  const sections: Record<string, { title: string; description: string; tracks: Track[]; playlists: PlaylistDef[] }> = {
+  const sections: Record<string, { title: string; description: string; tracks: Track[] }> = {
     podcasts: {
       title: "Подкасты",
       description: "Разговорные выпуски пока представлены подборкой спокойных треков для фона.",
       tracks: (metadataFeed.mood.length ? metadataFeed.mood : tracks.filter((t) => ["lofi", "jazz"].includes(t.genre))).slice(0, 8),
-      playlists: playlists.filter((p) => p.genreFilter.some((g) => ["lofi", "jazz"].includes(g))),
     },
     soundtracks: {
       title: "Саундтреки",
       description: "Кинематографичные и инструментальные треки из текущей библиотеки.",
       tracks: tracks.filter((t) => ["classical", "electronic"].includes(t.genre) || t.tags.includes("cinematic") || t.tags.includes("soundtrack")).slice(0, 8),
-      playlists: playlists.filter((p) => p.genreFilter.some((g) => ["classical", "electronic"].includes(g))),
     },
     new: {
       title: "Новинки",
       description: "Свежая полка из последних добавленных треков.",
       tracks: (metadataFeed.recent.length ? metadataFeed.recent : tracks).slice(0, 10),
-      playlists: playlists.filter((p) => p.userCreated).slice(-4),
     },
     charts: {
       title: "Чарты",
       description: "Самые заметные треки по длительности и энергии подборок.",
       tracks: (metadataFeed.top.length ? metadataFeed.top : [...tracks].sort((a, b) => b.duration - a.duration)).slice(0, 10),
-      playlists: playlists.slice(0, 4),
     },
   };
   return sections[id] || sections.new;
@@ -1280,18 +1386,6 @@ function renderQuickAccessPage(container: HTMLElement, sectionId: string) {
       <h2 class="text-2xl font-bold mb-2">${escapeHtml(section.title)}</h2>
       <p class="text-sm text-white/50 max-w-2xl">${escapeHtml(section.description)}</p>
     </div>
-    ${section.playlists.length > 0 ? `
-      <h3 class="text-sm font-semibold tracking-wide mb-3">Плейлисты</h3>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        ${section.playlists.map((pl) => `
-          <div class="quick-card rounded-xl bg-white/5 border border-white/10 p-4 cursor-pointer hover:bg-white/10 transition-all duration-300 active:scale-[0.98]" data-playlist-card="${pl.id}">
-            <div class="quick-icon w-10 h-10 rounded-lg bg-gradient-to-br ${pl.gradient} flex items-center justify-center text-lg mb-2">${pl.icon}</div>
-            <p class="text-sm font-medium truncate">${escapeHtml(pl.name)}</p>
-            <p class="text-xs text-white/40 truncate">${getPlaylistTracks(pl).length} треков</p>
-          </div>
-        `).join("")}
-      </div>
-    ` : ""}
     <h3 class="text-sm font-semibold tracking-wide mb-3">Треки</h3>
     ${section.tracks.length === 0 ? `
       <div class="playlist-empty py-16 flex flex-col items-center justify-center text-center">
@@ -1301,9 +1395,6 @@ function renderQuickAccessPage(container: HTMLElement, sectionId: string) {
       </div>
     ` : `<div class="space-y-1">${section.tracks.map((t, i) => renderTrackRow(t, i, "quick-track")).join("")}</div>`}
   `;
-  container.querySelectorAll<HTMLElement>("[data-playlist-card]").forEach((el) => {
-    el.addEventListener("click", () => switchPage("playlist", el.getAttribute("data-playlist-card")));
-  });
   wireTrackRows(container, ".quick-track", section.tracks, () => renderQuickAccessPage(container, sectionId));
 }
 
@@ -1402,7 +1493,7 @@ function renderFavoritesPage(container: HTMLElement) {
 
 function renderNotifications(container: HTMLElement) {
   const items = [
-    { icon: "🎵", color: "bg-indigo-500/20", title: 'Добавлен новый плейлист <span class="text-white font-medium">Late Nights</span>', time: "2 часа назад" },
+    { icon: "🎵", color: "bg-indigo-500/20", title: 'Обновилась персональная волна <span class="text-white font-medium">Ночной эфир</span>', time: "2 часа назад" },
     { icon: "✓", color: "bg-green-500/20", title: "Система Tauri успешно обновлена до версии 2.11.3", time: "1 день назад" },
     { icon: "⭐", color: "bg-amber-500/20", title: 'Доступна новая функция: <span class="text-white font-medium">Радио / Миксы</span>', time: "3 дня назад" },
     { icon: "🎧", color: "bg-blue-500/20", title: "Вы прослушали 100+ треков на этой неделе!", time: "5 дней назад" },
@@ -1430,25 +1521,69 @@ function renderNotifications(container: HTMLElement) {
 // ----------------------------------------------------------------
 
 function renderRadio(container: HTMLElement) {
+  const unique = (items: Track[]) => [...new Map(items.map((track) => [track.id, track])).values()];
+  const recentArtists = new Set(metadataFeed.recent.map((track) => track.artist.toLowerCase()));
+  const heroTracks = unique([...metadataFeed.recent, ...metadataFeed.top, ...metadataFeed.random, ...tracks]).slice(0, 24);
+  const heroTrack = heroTracks[0];
+  const mixes = [
+    { id: "personal", title: "Ваша волна", subtitle: "Знакомое и новое в одном потоке", tracks: unique([...metadataFeed.recent, ...metadataFeed.top, ...metadataFeed.random]).slice(0, 18) },
+    { id: "discovery", title: "Открытия дня", subtitle: "Исполнители за пределами привычного", tracks: unique([...metadataFeed.random, ...metadataFeed.global]).filter((track) => !recentArtists.has(track.artist.toLowerCase())).slice(0, 18) },
+    { id: "local", title: "Новая сцена", subtitle: "Актуальный русскоязычный звук", tracks: unique([...metadataFeed.ru, ...metadataFeed.trending]).slice(0, 18) },
+    { id: "global", title: "Мировой пульс", subtitle: "Треки, которые звучат прямо сейчас", tracks: unique([...metadataFeed.global, ...metadataFeed.top]).slice(0, 18) },
+  ].map((mix) => ({ ...mix, tracks: mix.tracks.length ? mix.tracks : heroTracks.slice(0, 18) }));
+  const discoveries = unique([...metadataFeed.random, ...metadataFeed.global, ...tracks]).filter((track) => track.id !== heroTrack?.id).slice(0, 8);
+  const stationIcons: Record<string, string> = { study: "⌘", chillout: "☁", energy: "ϟ", morning: "☀", road: "↗", evening: "◐" };
   container.innerHTML = `
-    <h2 class="text-base font-semibold tracking-wide mb-4">Радио по настроению</h2>
-    <div class="grid grid-cols-2 gap-3">
-      ${radioStations.map((s) => `
-        <div class="station-card rounded-xl bg-gradient-to-br ${s.gradient} p-5 h-32 flex flex-col justify-end cursor-pointer hover:scale-[1.02] transition-all duration-300 active:scale-[0.98] relative overflow-hidden group" data-station="${s.id}">
-          <div class="absolute right-3 top-3 w-10 h-10 rounded-full bg-white/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300">
-            <svg class="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-          </div>
-          <p class="text-white font-bold">${s.name}</p>
-          <p class="text-xs text-white/60">${s.desc}</p>
+    <div class="radio-dashboard">
+      <section class="radio-hero">
+        <div class="radio-hero-copy">
+          <div class="radio-kicker">Персональная радиоволна</div>
+          <h2>Музыка без конца и повторов</h2>
+          <p>Собираем непрерывный поток из вашей истории, свежих релизов и артистов, которых вы ещё не слушали.</p>
+          <div class="radio-hero-actions"><button id="radioStartWave" class="radio-primary-btn" type="button">Запустить волну</button><button id="radioBrowseMixes" class="radio-secondary-btn" type="button">Посмотреть миксы</button></div>
         </div>
-      `).join("")}
+        <div class="radio-hero-art" aria-hidden="true"><div class="radio-orbit"></div>${heroTrack ? renderCover(heroTrack, "radio-hero-cover flex items-center justify-center text-2xl") : ""}</div>
+      </section>
+      <section id="radioMixesSection">
+        <div class="radio-section-head"><div><h3>Миксы для вас</h3><p>Обновляются из реального каталога и вашей истории</p></div></div>
+        <div class="radio-mix-grid">
+          ${mixes.map((mix) => `<button class="radio-mix-card" type="button" data-radio-mix="${mix.id}"><span class="radio-mix-covers">${mix.tracks.slice(0, 2).map((track) => renderCover(track, "flex items-center justify-center text-xs")).join("")}</span><strong>${mix.title}</strong><span>${mix.subtitle} · ${mix.tracks.length} треков</span></button>`).join("")}
+        </div>
+      </section>
+      <section>
+        <div class="radio-section-head"><div><h3>Станции по настроению</h3><p>Один клик — и очередь уже собрана</p></div></div>
+        <div class="radio-station-list">
+          ${radioStations.map((station) => `<button class="radio-station-card" type="button" data-station="${station.id}"><span class="radio-station-icon bg-gradient-to-br ${station.gradient}">${stationIcons[station.id] || "♪"}</span><span><strong>${station.name}</strong><small>${station.desc}</small></span><span class="radio-live">ГОТОВО</span></button>`).join("")}
+        </div>
+      </section>
+      <section>
+        <div class="radio-section-head"><div><h3>Новые открытия</h3><p>Никаких одинаковых карточек подряд</p></div></div>
+        ${discoveries.length ? `<div class="home-compact-rail">${discoveries.map((track) => `<button class="home-compact-card text-left" type="button" data-radio-track="${track.id}">${renderCover(track, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}<span class="min-w-0 flex-1"><strong class="text-sm font-medium truncate block">${escapeHtml(track.title)}</strong><small class="text-xs text-white/40 truncate block">${escapeHtml(track.artist)}</small></span><span class="text-xs text-white/30">${track.durationLabel}</span></button>`).join("")}</div>` : `<div class="profile-empty-state">Открытия появятся после обновления каталога.</div>`}
+      </section>
     </div>
   `;
+  container.querySelector("#radioStartWave")?.addEventListener("click", () => {
+    if (heroTracks[0]) activateTrack(heroTracks, heroTracks[0].id);
+    else showTrackNotice("Радиоволна появится после загрузки каталога");
+  });
+  container.querySelector("#radioBrowseMixes")?.addEventListener("click", () => container.querySelector("#radioMixesSection")?.scrollIntoView({ behavior: getPlayerSettings().reduceMotion ? "auto" : "smooth" }));
+  container.querySelectorAll<HTMLElement>("[data-radio-mix]").forEach((element) => {
+    element.addEventListener("click", () => {
+      const mix = mixes.find((item) => item.id === element.dataset.radioMix);
+      if (mix?.tracks[0]) activateTrack(mix.tracks, mix.tracks[0].id);
+    });
+  });
   container.querySelectorAll<HTMLElement>(".station-card").forEach((el) => {
     el.addEventListener("click", () => {
       const id = el.getAttribute("data-station");
       if (id) switchPage("station", id);
     });
+  });
+  container.querySelectorAll<HTMLElement>(".radio-station-card").forEach((element) => {
+    element.addEventListener("click", () => { const id = element.dataset.station; if (id) switchPage("station", id); });
+  });
+  container.querySelectorAll<HTMLElement>("[data-radio-track]").forEach((element) => {
+    element.addEventListener("click", () => { const id = normalizeTrackId(element.dataset.radioTrack); if (id) activateTrack(discoveries, id); });
   });
 }
 
@@ -1537,172 +1672,134 @@ function renderProfile(container: HTMLElement) {
   const likedCount = tracks.filter((t) => t.liked).length;
   const listenedTracks = metadataFeed.recent;
   const topArtists = [...new Set(listenedTracks.map((t) => t.artist))].slice(0, 4);
-  const topTracks = listenedTracks.slice(0, 5);
+  const topTracks = listenedTracks.slice(0, 6);
   const hasRealStats = listenedTracks.length > 0;
+  const preferences = getProfilePreferences();
+  const listenedMinutes = Math.round(listenedTracks.reduce((sum, track) => sum + track.duration, 0) / 60);
+  const goalProgress = Math.min(100, Math.round((listenedMinutes / Math.max(1, preferences.weeklyGoal)) * 100));
+  const genreCounts = listenedTracks.reduce<Record<string, number>>((counts, track) => {
+    counts[track.genre] = (counts[track.genre] || 0) + 1;
+    return counts;
+  }, {});
+  const favoriteGenre = Object.entries(genreCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+  const joinedAt = user?.created_at ? new Date(user.created_at).toLocaleDateString("ru-RU", { month: "long", year: "numeric" }) : "недавно";
+  const subscription = user?.subscription_status === "premium" ? "Premium" : "Free";
   const avatarHtml = user?.avatar_url
     ? `<img class="profile-avatar-img" src="${escapeHtml(user.avatar_url)}" alt="${escapeHtml(user.nickname)}" />`
     : `<span>${escapeHtml(authInitials(user))}</span>`;
 
   container.innerHTML = `
-    <div class="flex flex-col items-center py-6">
-      <div class="profile-avatar w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-rose-500 flex items-center justify-center text-2xl mb-4 border-2 border-white/10 overflow-hidden">${avatarHtml}</div>
-      <h2 class="text-lg font-semibold">${escapeHtml(user?.nickname || "Пользователь")}</h2>
-      <p class="text-xs text-white/40 mt-0.5">@${escapeHtml(user?.login || "login")}</p>
+    <section class="profile-hero-v2">
+      <div class="profile-avatar w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-rose-500 flex items-center justify-center text-2xl border-2 border-white/10 overflow-hidden">${avatarHtml}</div>
+      <div class="profile-identity">
+        <h2>${escapeHtml(user?.nickname || "Пользователь")}</h2>
+        <p>@${escapeHtml(user?.login || "login")} · с нами с ${escapeHtml(joinedAt)}</p>
+        <span class="profile-badge">${subscription}</span>
+      </div>
+      <div class="profile-hero-actions">
+        <button id="profileFavoritesBtn" class="profile-action-btn" type="button">Избранное</button>
+        <button id="profileEqualizerBtn" class="profile-action-btn" type="button">Эквалайзер</button>
+        <button id="profileSettingsBtn" class="profile-action-btn" type="button">Настройки</button>
+      </div>
+    </section>
+    <div class="profile-stats-v2">
+      <div class="profile-stat-v2"><strong>${listenedTracks.length}</strong><span>Недавних треков</span></div>
+      <div class="profile-stat-v2"><strong>${likedCount}</strong><span>В избранном</span></div>
+      <div class="profile-stat-v2"><strong>${listenedMinutes}</strong><span>Минут в недавнем</span></div>
+      <div class="profile-stat-v2"><strong>${escapeHtml(favoriteGenre)}</strong><span>Частый жанр</span></div>
     </div>
-    <div class="grid grid-cols-3 gap-3 mb-6">
-      <div class="profile-stat rounded-xl bg-white/[0.03] border border-white/5 p-4 text-center">
-        <p class="text-xl font-bold text-white">${listenedTracks.length}</p>
-        <p class="text-xs text-white/40 mt-1">Прослушано</p>
-      </div>
-      <div class="profile-stat rounded-xl bg-white/[0.03] border border-white/5 p-4 text-center">
-        <p class="text-xl font-bold text-white">${likedCount}</p>
-        <p class="text-xs text-white/40 mt-1">В избранном</p>
-      </div>
-      <div class="profile-stat rounded-xl bg-white/[0.03] border border-white/5 p-4 text-center">
-        <p class="text-xl font-bold text-white">${playlists.filter((playlist) => playlist.userCreated).length}</p>
-        <p class="text-xs text-white/40 mt-1">Плейлисты</p>
-      </div>
+    <div class="profile-grid-v2">
+      <section class="profile-card-v2">
+        <div class="settings-section-head"><h3>О себе</h3><span>Только на этом аккаунте</span></div>
+        <form id="profilePreferencesForm" class="profile-fields-v2">
+          <label class="profile-field-v2">Статус<input id="profileBioInput" value="${escapeHtml(preferences.bio)}" maxlength="120" /></label>
+          <label class="profile-field-v2">Музыкальное настроение<select id="profileMoodSelect">
+            ${["Открываю новое", "Всегда в ритме", "Ночной слушатель", "Музыка для фокуса"].map((mood) => `<option ${preferences.mood === mood ? "selected" : ""}>${mood}</option>`).join("")}
+          </select></label>
+          <label class="profile-field-v2">Цель на неделю: <span id="profileGoalValue">${preferences.weeklyGoal} минут</span><input id="profileGoalInput" type="range" min="30" max="600" step="30" value="${preferences.weeklyGoal}" /></label>
+          <div><div class="goal-track"><span style="width:${goalProgress}%"></span></div><div class="profile-goal-copy">${listenedMinutes} из ${preferences.weeklyGoal} минут · ${goalProgress}%</div></div>
+          <button class="profile-action-btn" type="submit">Сохранить предпочтения</button>
+        </form>
+      </section>
+      <section class="profile-card-v2">
+        <div class="settings-section-head"><h3>Аккаунт</h3><span>ID ${user?.id ?? "—"}</span></div>
+        <form id="profileNicknameForm" class="profile-inline-form">
+          <label><span>Имя в приложении</span><input id="profileNicknameInput" value="${escapeHtml(user?.nickname || "")}" maxlength="96" autocomplete="nickname" /></label>
+          <button type="submit">Сохранить</button>
+        </form>
+        <label class="profile-upload-btn"><input id="profileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /><span>Изменить аватар</span></label>
+        <div class="profile-account-note">Статус: ${subscription} · профиль защищён авторизацией</div>
+      </section>
     </div>
-    <div class="profile-account-panel mb-6">
-      <form id="profileNicknameForm" class="profile-inline-form">
-        <label>
-          <span>Имя в приложении</span>
-          <input id="profileNicknameInput" value="${escapeHtml(user?.nickname || "")}" maxlength="96" autocomplete="nickname" />
-        </label>
-        <button type="submit">Сохранить</button>
-      </form>
-      <label class="profile-upload-btn">
-        <input id="profileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
-        <span>Изменить аватар</span>
-      </label>
-    </div>
-    <h3 class="text-sm font-semibold tracking-wide mb-3">Любимые исполнители</h3>
-    ${hasRealStats ? `
-      <div class="artist-grid grid grid-cols-4 gap-3 mb-6">
-        ${topArtists.map((a) => {
-          const primary = listenedTracks.find((t) => t.artist === a);
-          return `<div class="artist-card text-center cursor-pointer transition-all duration-300 active:scale-95" role="button" tabindex="0" aria-label="Открыть исполнителя ${escapeHtml(a)}">${primary ? renderCover(primary, "artist-avatar mx-auto flex items-center justify-center", "text-sm") : ""}<p class="text-xs font-medium truncate">${escapeHtml(a)}</p><p class="text-[11px] text-white/30 truncate">Исполнитель</p></div>`;
-        }).join("")}
-      </div>
-    ` : `<div class="profile-empty-state mb-6">Здесь будет ваша статистика. Слушайте больше треков!</div>`}
-    <h3 class="text-sm font-semibold tracking-wide mb-3">Топ треков за месяц</h3>
-    ${hasRealStats ? `
-      <div class="space-y-1">
-        ${topTracks.map((t, i) => `
-          <div class="profile-track flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99] group" data-id="${t.id}" role="button" tabindex="0" aria-label="Воспроизвести ${escapeHtml(t.title)} — ${escapeHtml(t.artist)}">
-            <span class="text-xs text-white/30 w-6 text-center font-bold">${i + 1}</span>
-            ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
-            <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
-              <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
-            </div>
-            <button class="focus-btn text-white/20 hover:text-indigo-400 transition-all duration-300 opacity-0 group-hover:opacity-100 cursor-pointer" type="button" title="Добавить в избранное" aria-label="Добавить в избранное">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-            </button>
-          </div>
-        `).join("")}
-      </div>
-    ` : `<div class="profile-empty-state">Здесь будет ваша статистика. Слушайте больше треков!</div>`}
-    <div class="profile-logout-wrap">
-      <button id="profileLogoutBtn" type="button" class="profile-logout-btn">Выйти</button>
-    </div>
+    <section class="profile-card-v2 mt-3">
+      <div class="settings-section-head"><h3>Часто слушаете</h3><span>${topArtists.length} исполнителя</span></div>
+      ${hasRealStats ? `<div class="artist-grid grid grid-cols-4 gap-3">${topArtists.map((artist) => {
+        const primary = listenedTracks.find((track) => track.artist === artist);
+        return `<div class="artist-card text-center cursor-pointer" role="button" tabindex="0" data-artist="${escapeHtml(artist)}">${primary ? renderCover(primary, "artist-avatar mx-auto flex items-center justify-center", "text-sm") : ""}<p class="text-xs font-medium truncate">${escapeHtml(artist)}</p><p class="text-[11px] text-white/30">Исполнитель</p></div>`;
+      }).join("")}</div>` : `<div class="profile-empty-state">Послушайте несколько треков — здесь появятся ваши исполнители.</div>`}
+    </section>
+    <section class="profile-card-v2 mt-3">
+      <div class="settings-section-head"><h3>Недавние треки</h3><span>${topTracks.length} последних</span></div>
+      ${hasRealStats ? `<div class="space-y-1">${topTracks.map((track, index) => `<div class="profile-track flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer group" data-id="${track.id}" role="button" tabindex="0"><span class="text-xs text-white/30 w-6 text-center">${index + 1}</span>${renderCover(track, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}<div class="flex-1 min-w-0"><p class="text-sm font-medium truncate">${escapeHtml(track.title)}</p><p class="text-xs text-white/40 truncate">${escapeHtml(track.artist)}</p></div><button class="profile-like-btn playlist-row-btn ${track.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${track.id}" type="button" aria-label="${track.liked ? "Убрать из избранного" : "Добавить в избранное"}"><svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg></button><span class="text-xs text-white/30">${track.durationLabel}</span></div>`).join("")}</div>` : `<div class="profile-empty-state">Недавние треки появятся после первого прослушивания.</div>`}
+    </section>
+    <div class="profile-logout-wrap"><button id="profileLogoutBtn" type="button" class="profile-logout-btn">Выйти из аккаунта</button></div>
   `;
+
+  container.querySelector("#profileFavoritesBtn")?.addEventListener("click", () => switchPage("favorites"));
+  container.querySelector("#profileSettingsBtn")?.addEventListener("click", () => switchPage("settings"));
+  container.querySelector("#profileEqualizerBtn")?.addEventListener("click", showEqualizerModal);
+  container.querySelector<HTMLInputElement>("#profileGoalInput")?.addEventListener("input", (event) => {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    const output = container.querySelector("#profileGoalValue");
+    if (output) output.textContent = `${value} минут`;
+  });
+  container.querySelector<HTMLFormElement>("#profilePreferencesForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveProfilePreferences({
+      bio: (container.querySelector<HTMLInputElement>("#profileBioInput")?.value || "").trim(),
+      mood: container.querySelector<HTMLSelectElement>("#profileMoodSelect")?.value || DEFAULT_PROFILE_PREFERENCES.mood,
+      weeklyGoal: Number(container.querySelector<HTMLInputElement>("#profileGoalInput")?.value || DEFAULT_PROFILE_PREFERENCES.weeklyGoal),
+    });
+    showTrackNotice("Предпочтения профиля сохранены");
+    renderProfile(container);
+  });
 
   container.querySelector<HTMLFormElement>("#profileNicknameForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const input = container.querySelector<HTMLInputElement>("#profileNicknameInput");
-    const nickname = (input?.value || "").trim();
+    const nickname = (container.querySelector<HTMLInputElement>("#profileNicknameInput")?.value || "").trim();
     if (!nickname) return;
-    try {
-      currentAuthUser = await updateNickname(nickname);
-      renderProfile(container);
-      showTrackNotice("Профиль обновлён");
-    } catch {
-      showTrackNotice("Не удалось обновить профиль");
-    }
+    try { currentAuthUser = await updateNickname(nickname); renderProfile(container); showTrackNotice("Профиль обновлён"); }
+    catch { showTrackNotice("Не удалось обновить профиль"); }
   });
-
   container.querySelector<HTMLInputElement>("#profileAvatarInput")?.addEventListener("change", (event) => {
-    const file = (event.target as HTMLInputElement).files?.[0];
+    const file = (event.currentTarget as HTMLInputElement).files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.addEventListener("load", async () => {
-      try {
-        currentAuthUser = await updateAvatar(String(reader.result || ""));
-        renderProfile(container);
-        showTrackNotice("Аватар обновлён");
-      } catch {
-        showTrackNotice("Не удалось обновить аватар");
-      }
+      try { currentAuthUser = await updateAvatar(String(reader.result || "")); renderProfile(container); showTrackNotice("Аватар обновлён"); }
+      catch { showTrackNotice("Не удалось обновить аватар"); }
     });
     reader.readAsDataURL(file);
   });
-
-  container.querySelector<HTMLButtonElement>("#profileLogoutBtn")?.addEventListener("click", logoutAccount);
-
-  container.querySelectorAll<HTMLElement>(".artist-card").forEach((el, index) => {
-    const artist = topArtists[index];
+  container.querySelector("#profileLogoutBtn")?.addEventListener("click", logoutAccount);
+  container.querySelectorAll<HTMLElement>(".artist-card").forEach((element) => {
+    const artist = element.dataset.artist;
     if (!artist) return;
-    el.setAttribute("data-artist", artist);
-    el.addEventListener("click", () => switchPage("artist", artist));
-    el.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      switchPage("artist", artist);
-    });
+    const open = () => switchPage("artist", artist);
+    element.addEventListener("click", open);
+    element.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
-
-  container.querySelectorAll<HTMLElement>(".profile-track").forEach((el) => {
-    const trackId = getElementTrackId(el);
-    if (!trackId) return;
-    const track = getTrack(trackId);
-    if (!track) return;
-    const focusBtn = el.querySelector(".focus-btn");
-    if (focusBtn) {
-      focusBtn.innerHTML = `<svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>`;
-      focusBtn.className = `profile-like-btn playlist-row-btn ${track.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}`;
-      focusBtn.setAttribute("data-track-id", String(trackId));
-      focusBtn.setAttribute("title", track.liked ? "Убрать из избранного" : "Добавить в избранное");
-      focusBtn.setAttribute("aria-label", track.liked ? "Убрать из избранного" : "Добавить в избранное");
-      focusBtn.setAttribute("aria-pressed", String(track.liked));
-    }
-    const addBtn = document.createElement("button");
-    addBtn.className = "profile-add-btn playlist-row-btn opacity-0 group-hover:opacity-100";
-    addBtn.setAttribute("data-track-id", String(trackId));
-    addBtn.setAttribute("type", "button");
-    addBtn.setAttribute("title", "Добавить в плейлист");
-    addBtn.setAttribute("aria-label", "Добавить в плейлист");
-    addBtn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>`;
-    focusBtn?.after(addBtn);
+  container.querySelectorAll<HTMLElement>(".profile-track").forEach((element) => {
+    const open = () => { const id = getElementTrackId(element); if (id) activateTrack(tracks, id); };
+    element.addEventListener("click", (event) => { if (!(event.target as HTMLElement).closest("button")) open(); });
+    element.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
-
-  container.querySelectorAll<HTMLElement>(".profile-track").forEach((el) => {
-    el.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest("button")) return;
-      const id = getElementTrackId(el);
-      if (id) activateTrack(tracks, id);
-    });
-    el.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      if ((event.target as HTMLElement).closest("button")) return;
-      event.preventDefault();
-      const id = getElementTrackId(el);
-      if (id) activateTrack(tracks, id);
-    });
-  });
-  container.querySelectorAll<HTMLElement>(".profile-like-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const trackId = getElementTrackId(btn, "data-track-id");
+  container.querySelectorAll<HTMLElement>(".profile-like-btn").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const trackId = getElementTrackId(button, "data-track-id");
       if (trackId) toggleTrackLike(trackId);
       renderProfile(container);
-    });
-  });
-  container.querySelectorAll<HTMLElement>(".profile-add-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const trackId = getElementTrackId(btn, "data-track-id");
-      if (trackId) showPlaylistPopup(btn, trackId);
     });
   });
   updateActiveTrackHighlight();
@@ -1741,10 +1838,6 @@ function renderTrackDetailPage(container: HTMLElement, trackId: string) {
               <svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
               <span>В избранное</span>
             </button>
-            <button class="detail-add-btn" type="button">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-              <span>В плейлист</span>
-            </button>
             <button class="detail-play-btn" type="button">
               <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
               <span>${canPlayTrack(track) ? "Слушать" : "Детали"}</span>
@@ -1758,7 +1851,6 @@ function renderTrackDetailPage(container: HTMLElement, trackId: string) {
       toggleTrackLike(track.id);
       renderTrackDetailPage(container, track.id);
     });
-    container.querySelector(".detail-add-btn")?.addEventListener("click", (e) => showPlaylistPopup(e.currentTarget as HTMLElement, track.id));
     container.querySelector(".detail-play-btn")?.addEventListener("click", () => {
       if (canPlayTrack(track)) activateTrack([track], track.id);
       else showTrackNotice("Аудио пока недоступно");
@@ -1937,81 +2029,186 @@ makeDraggable(focusTimeline, focusTimelineFill, focusTimelineThumb, (pct) => {
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
+function showEqualizerModal() {
+  document.querySelector(".equalizer-overlay")?.remove();
+  const trigger = document.getElementById("hdrEqualizer") as HTMLButtonElement | null;
+  const overlay = document.createElement("div");
+  overlay.className = "equalizer-overlay";
+  const presetEntries = (Object.entries(EQ_PRESETS) as [EqualizerPresetId, { label: string; gains: number[] }][]).filter(
+    ([id]) => id !== "custom",
+  );
+  overlay.innerHTML = `
+    <section class="equalizer-modal" role="dialog" aria-modal="true" aria-labelledby="equalizerTitle">
+      <div class="equalizer-head">
+        <div><div id="equalizerTitle" class="equalizer-title">Эквалайзер</div><div class="equalizer-subtitle">Настройте характер звука или выберите готовый профиль</div></div>
+        <button class="equalizer-close" type="button" aria-label="Закрыть">×</button>
+      </div>
+      <div class="equalizer-toolbar">
+        <div class="equalizer-status"><button class="equalizer-power ${equalizerState.enabled ? "is-on" : ""}" type="button" role="switch" aria-checked="${equalizerState.enabled}"></button><span>${equalizerState.enabled ? "Обработка включена" : "Обработка выключена"}</span></div>
+        <div class="equalizer-presets">${presetEntries.map(([id, preset]) => `<button class="equalizer-preset ${equalizerState.preset === id ? "is-active" : ""}" type="button" data-eq-preset="${id}">${preset.label}</button>`).join("")}</div>
+      </div>
+      <div class="equalizer-bands">
+        ${EQ_FREQUENCIES.map((frequency, index) => `<label class="equalizer-band"><output data-eq-output="${index}">${equalizerState.gains[index] > 0 ? "+" : ""}${equalizerState.gains[index]} dB</output><input type="range" min="-12" max="12" step="1" value="${equalizerState.gains[index]}" data-eq-band="${index}" aria-label="${frequency < 1000 ? frequency : `${frequency / 1000} к`} герц"><span>${frequency < 1000 ? frequency : `${frequency / 1000}k`} Hz</span></label>`).join("")}
+      </div>
+      <div class="equalizer-footnote"><span>Автоматический запас громкости защищает звук от перегрузки</span><span>${EQ_FREQUENCIES.length} полос · −12…+12 dB</span></div>
+    </section>`;
+  document.body.appendChild(overlay);
+  trigger?.setAttribute("aria-expanded", "true");
+
+  const modal = overlay.querySelector<HTMLElement>(".equalizer-modal")!;
+  const closeButton = overlay.querySelector<HTMLButtonElement>(".equalizer-close")!;
+  const power = overlay.querySelector<HTMLButtonElement>(".equalizer-power")!;
+  const status = overlay.querySelector<HTMLElement>(".equalizer-status span")!;
+  const close = () => {
+    overlay.remove();
+    trigger?.setAttribute("aria-expanded", "false");
+    trigger?.focus();
+  };
+  const syncControls = () => {
+    power.classList.toggle("is-on", equalizerState.enabled);
+    power.setAttribute("aria-checked", String(equalizerState.enabled));
+    status.textContent = equalizerState.enabled ? "Обработка включена" : "Обработка выключена";
+    overlay.querySelectorAll<HTMLElement>("[data-eq-preset]").forEach((button) => button.classList.toggle("is-active", button.dataset.eqPreset === equalizerState.preset));
+    equalizerState.gains.forEach((gain, index) => {
+      const slider = overlay.querySelector<HTMLInputElement>(`[data-eq-band="${index}"]`);
+      const output = overlay.querySelector<HTMLOutputElement>(`[data-eq-output="${index}"]`);
+      if (slider) slider.value = String(gain);
+      if (output) output.value = `${gain > 0 ? "+" : ""}${gain} dB`;
+    });
+  };
+
+  power.addEventListener("click", async () => {
+    if (!await ensureAudioGraph()) {
+      showTrackNotice("Эквалайзер недоступен для этого аудиопотока");
+      return;
+    }
+    equalizerState.enabled = !equalizerState.enabled;
+    applyEqualizerGains();
+    saveEqualizerState();
+    syncControls();
+  });
+  overlay.querySelectorAll<HTMLButtonElement>("[data-eq-preset]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const presetId = button.dataset.eqPreset as EqualizerPresetId;
+      if (!EQ_PRESETS[presetId] || !await ensureAudioGraph()) return;
+      equalizerState = { enabled: true, preset: presetId, gains: [...EQ_PRESETS[presetId].gains] };
+      applyEqualizerGains();
+      saveEqualizerState();
+      syncControls();
+    });
+  });
+  overlay.querySelectorAll<HTMLInputElement>("[data-eq-band]").forEach((slider) => {
+    slider.addEventListener("input", async () => {
+      if (!await ensureAudioGraph()) return;
+      const index = Number(slider.dataset.eqBand);
+      equalizerState.gains[index] = Number(slider.value);
+      equalizerState.preset = "custom";
+      equalizerState.enabled = true;
+      applyEqualizerGains();
+      saveEqualizerState();
+      syncControls();
+    });
+  });
+  closeButton.addEventListener("click", close);
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); close(); return; }
+    if (event.key !== "Tab") return;
+    const focusable = [...modal.querySelectorAll<HTMLElement>("button, input")];
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
+  window.setTimeout(() => closeButton.focus(), 30);
+}
+
+function settingSwitch(id: string, checked: boolean): string {
+  return `<label class="relative inline-flex items-center cursor-pointer">
+    <input id="${id}" type="checkbox" ${checked ? "checked" : ""} class="sr-only peer">
+    <span class="w-9 h-5 bg-white/10 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:duration-300 peer-checked:after:translate-x-4"></span>
+  </label>`;
+}
+
 function renderSettings(container: HTMLElement) {
   const s = getPlayerSettings();
   container.innerHTML = `
-    <h2 class="text-base font-semibold tracking-wide mb-4">Настройки</h2>
-    <div class="rounded-xl bg-white/[0.03] border border-white/5 p-4 mb-3">
-      <h3 class="text-sm font-medium mb-3">Внешний вид</h3>
-      <div class="flex items-center justify-between mb-3">
-        <span class="text-sm text-white/70">Тёмная тема</span>
-        <label class="relative inline-flex items-center cursor-pointer">
-          <input id="themeToggle" type="checkbox" ${s.theme ? "checked" : ""} class="sr-only peer">
-          <div class="w-9 h-5 bg-white/10 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:duration-300 peer-checked:after:translate-x-4"></div>
-        </label>
-      </div>
-      <div class="flex items-center justify-between">
-        <span class="text-sm text-white/70">Масштаб интерфейса</span>
-        <div class="flex items-center gap-2">
-          <span class="text-xs text-white/30">80%</span>
-          <input id="scaleSlider" type="range" min="80" max="120" value="${s.scale}" class="w-24 h-1 bg-white/10 rounded-full appearance-none cursor-pointer accent-indigo-500" />
-          <span class="text-xs text-white/30">120%</span>
-        </div>
-      </div>
+    <div class="radio-section-head">
+      <div><h2 class="text-base font-semibold tracking-wide">Настройки</h2><p>Управляйте звуком, поведением и внешним видом приложения</p></div>
+      <button id="resetSettingsBtn" class="settings-reset-btn" type="button">Сбросить настройки</button>
     </div>
-    <div class="rounded-xl bg-white/[0.03] border border-white/5 p-4 mb-3">
-      <h3 class="text-sm font-medium mb-3">Звук</h3>
-      <div class="flex items-center justify-between mb-3">
-        <span class="text-sm text-white/70">Аудиоустройство</span>
-        <select class="bg-white/5 border border-white/10 rounded-lg text-sm text-white/70 px-3 py-1.5 outline-none cursor-pointer">
-          <option>Системное (по умолчанию)</option>
-          <option>Динамики (Realtek)</option>
-          <option>Наушники (USB Audio)</option>
-        </select>
-      </div>
-      <div class="flex items-center justify-between mb-3">
-        <span class="text-sm text-white/70">Нормализация громкости</span>
-        <label class="relative inline-flex items-center cursor-pointer">
-          <input id="normalizeToggle" type="checkbox" ${s.normalize ? "checked" : ""} class="sr-only peer">
-          <div class="w-9 h-5 bg-white/10 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:duration-300 peer-checked:after:translate-x-4"></div>
-        </label>
-      </div>
-      <div class="flex items-center justify-between">
-        <span class="text-sm text-white/70">Плавный переход (Crossfade)</span>
-        <label class="relative inline-flex items-center cursor-pointer">
-          <input id="crossfadeToggle" type="checkbox" ${s.crossfade ? "checked" : ""} class="sr-only peer">
-          <div class="w-9 h-5 bg-white/10 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:duration-300 peer-checked:after:translate-x-4"></div>
-        </label>
-      </div>
-    </div>
-    <div class="rounded-xl bg-white/[0.03] border border-white/5 p-4">
-      <h3 class="text-sm font-medium mb-3">О приложении</h3>
-      <div class="flex items-center gap-3 mb-3">
-        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-sm font-bold shrink-0">♪</div>
-        <div><p class="text-sm font-medium">Музыкальный плеер</p><p class="text-xs text-white/40">Версия 1.0.0</p></div>
-      </div>
-      <div class="flex items-center gap-2 text-xs text-green-400"><span class="w-2 h-2 rounded-full bg-green-400"></span>Приложение запущено локально</div>
-    </div>
-    <div class="rounded-xl bg-white/[0.03] border border-white/5 p-4 mt-3">
-      <h3 class="text-sm font-medium mb-3">Обратная связь</h3>
-      <button id="bugReportBtn" class="bug-report-entry" type="button">
-        <span class="bug-report-entry-icon">!</span>
-        <span>
-          <span class="bug-report-entry-title">Сообщить о баге</span>
-          <span class="bug-report-entry-subtitle">Отправить короткое описание проблемы</span>
-        </span>
-      </button>
+    <div class="settings-layout">
+      <section class="settings-card-v2">
+        <div class="settings-section-head"><h3>Внешний вид</h3><span>Интерфейс</span></div>
+        <div class="setting-row"><div><strong>Тёмная тема</strong><small>Глубокий контраст для вечернего прослушивания</small></div>${settingSwitch("themeToggle", s.theme)}</div>
+        <div class="setting-row"><div><strong>Компактный режим</strong><small>Больше музыки помещается на экране</small></div>${settingSwitch("compactToggle", s.compact)}</div>
+        <div class="setting-row"><div><strong>Меньше анимаций</strong><small>Отключает вращения и плавные перемещения</small></div>${settingSwitch("reduceMotionToggle", s.reduceMotion)}</div>
+        <div class="setting-row"><div><strong>Акцент интерфейса</strong><small>Цвет активных элементов и прогресса</small></div><select id="accentSelect" class="settings-select">
+          <option value="violet" ${s.accent === "violet" ? "selected" : ""}>Фиолетовый</option>
+          <option value="rose" ${s.accent === "rose" ? "selected" : ""}>Розовый</option>
+          <option value="cyan" ${s.accent === "cyan" ? "selected" : ""}>Бирюзовый</option>
+          <option value="lime" ${s.accent === "lime" ? "selected" : ""}>Лаймовый</option>
+        </select></div>
+        <div class="setting-row"><div><strong>Масштаб</strong><small><span id="scaleValue">${s.scale}%</span> от стандартного размера</small></div><input id="scaleSlider" type="range" min="80" max="120" value="${s.scale}" class="w-28 accent-indigo-500" /></div>
+      </section>
+
+      <section class="settings-card-v2">
+        <div class="settings-section-head"><h3>Воспроизведение</h3><span>Поток</span></div>
+        <div class="setting-row"><div><strong>Автовоспроизведение</strong><small>Продолжать очередь после окончания трека</small></div>${settingSwitch("autoplayToggle", s.autoplay)}</div>
+        <div class="setting-row"><div><strong>Быстрая загрузка следующего</strong><small>Подготавливать следующий трек в фоне</small></div>${settingSwitch("prefetchToggle", s.prefetch)}</div>
+        <div class="setting-row"><div><strong>Нормализация громкости</strong><small>Сглаживать перепады между записями</small></div>${settingSwitch("normalizeToggle", s.normalize)}</div>
+        <div class="setting-row"><div><strong>Плавный переход</strong><small>Мягко проявлять звук при смене трека</small></div>${settingSwitch("crossfadeToggle", s.crossfade)}</div>
+        <div class="setting-row"><div><strong>Аудиовыход</strong><small>Устройство, на которое направлен звук</small></div><select id="audioOutputSelect" class="settings-select"><option value="">Системное устройство</option></select></div>
+      </section>
+
+      <section class="settings-card-v2 is-wide">
+        <div class="settings-section-head"><h3>Персональный звук</h3><span>6 полос</span></div>
+        <div class="setting-row"><div><strong>Эквалайзер</strong><small>${equalizerState.enabled ? `Активен профиль «${EQ_PRESETS[equalizerState.preset].label}»` : "Сейчас звук воспроизводится без коррекции"}</small></div><button id="openEqualizerSettings" class="profile-action-btn" type="button">Настроить</button></div>
+        <div class="setting-row"><div><strong>Million Music Desktop</strong><small>Версия 1.2 · защищённое подключение к музыкальному каталогу</small></div><span class="text-xs text-emerald-300">● Онлайн</span></div>
+        <div class="setting-row"><div><strong>Помочь улучшить приложение</strong><small>Опишите проблему — отчёт попадёт в админ-панель</small></div><button id="bugReportBtn" class="profile-action-btn" type="button">Сообщить о баге</button></div>
+      </section>
     </div>
   `;
 
-  document.getElementById("themeToggle")?.addEventListener("change", function () { saveSettings(); applySettingsEffects(); });
-  document.getElementById("scaleSlider")?.addEventListener("input", function (this: HTMLInputElement) {
-    saveSettings();
-    applySettingsEffects();
+  ["themeToggle", "compactToggle", "reduceMotionToggle", "autoplayToggle", "prefetchToggle", "normalizeToggle", "crossfadeToggle"].forEach((id) => {
+    container.querySelector(`#${id}`)?.addEventListener("change", () => { saveSettings(); applySettingsEffects(); });
   });
-  document.getElementById("normalizeToggle")?.addEventListener("change", function () { saveSettings(); applySettingsEffects(); });
-  document.getElementById("crossfadeToggle")?.addEventListener("change", function () { saveSettings(); applySettingsEffects(); });
-  document.getElementById("bugReportBtn")?.addEventListener("click", showBugReportModal);
+  container.querySelector<HTMLInputElement>("#scaleSlider")?.addEventListener("input", (event) => {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    const output = container.querySelector("#scaleValue");
+    if (output) output.textContent = `${value}%`;
+    saveSettings(); applySettingsEffects();
+  });
+  container.querySelector("#accentSelect")?.addEventListener("change", () => { saveSettings(); applySettingsEffects(); });
+  container.querySelector("#openEqualizerSettings")?.addEventListener("click", showEqualizerModal);
+  container.querySelector("#bugReportBtn")?.addEventListener("click", showBugReportModal);
+  container.querySelector("#resetSettingsBtn")?.addEventListener("click", () => {
+    localStorage.removeItem(accountStorageKey(STORAGE_KEY_SETTINGS));
+    savedSettings = { ...DEFAULT_SETTINGS };
+    applySettingsEffects();
+    renderSettings(container);
+    showTrackNotice("Настройки сброшены");
+  });
+
+  const outputSelect = container.querySelector<HTMLSelectElement>("#audioOutputSelect");
+  navigator.mediaDevices?.enumerateDevices().then((devices) => {
+    const outputs = devices.filter((device) => device.kind === "audiooutput");
+    outputs.forEach((device, index) => {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label || `Аудиовыход ${index + 1}`;
+      outputSelect?.appendChild(option);
+    });
+  }).catch(() => undefined);
+  outputSelect?.addEventListener("change", async () => {
+    const sinkAudio = audioEl as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+    try {
+      await sinkAudio.setSinkId?.(outputSelect.value);
+      showTrackNotice("Аудиовыход изменён");
+    } catch {
+      showTrackNotice("Не удалось переключить аудиовыход");
+    }
+  });
 }
 
 function getPlayerSettings(): PlayerSettings {
@@ -2021,11 +2218,15 @@ function getPlayerSettings(): PlayerSettings {
 function applySettingsEffects() {
   const settings = getPlayerSettings();
   const scale = Math.max(80, Math.min(120, parseFloat(settings.scale || "100")));
-  document.documentElement.style.fontSize = `${(scale / 100) * 15}px`;
+  document.documentElement.style.fontSize = `${(scale / 100) * 16}px`;
   document.documentElement.dataset.theme = settings.theme ? "dark" : "dim";
+  document.documentElement.style.setProperty("--accent", ACCENT_COLORS[settings.accent] || ACCENT_COLORS.violet);
   document.body.classList.toggle("audio-normalized", settings.normalize);
   document.body.classList.toggle("crossfade-enabled", settings.crossfade);
+  document.body.classList.toggle("compact-ui", settings.compact);
+  document.body.classList.toggle("reduce-motion", settings.reduceMotion);
   applyVolume();
+  applyEqualizerGains();
 }
 
 function countBugReportWords(text: string): number {
@@ -2622,11 +2823,18 @@ const STORAGE_KEY_PLTRACKS = "mm_pltracks";
 const STORAGE_KEY_PLREMOVED = "mm_plremoved";
 const STORAGE_KEY_PLORDER = "mm_plorder";
 const STORAGE_KEY_USER_PLAYLISTS = "mm_user_playlists";
+const STORAGE_KEY_EQUALIZER = "mm_equalizer";
+const STORAGE_KEY_PROFILE_PREFERENCES = "mm_profile_preferences";
 
 let savedSettings: Record<string, any> | null = null;
 let playlistTrackAssign: Record<string, TrackId[]> = {};
 let playlistTrackRemoved: Record<string, TrackId[]> = {};
 let playlistOrder: string[] = [];
+
+function accountStorageKey(baseKey: string): string {
+  const user = currentAuthUser || getStoredAuthUser();
+  return `${baseKey}:user:${user?.id ?? "guest"}`;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]!));
@@ -2641,12 +2849,13 @@ function normalizeStoredPlaylistTracks(value: unknown): Record<string, TrackId[]
 }
 
 function saveLikedTracks() {
-  localStorage.setItem(STORAGE_KEY_LIKED, JSON.stringify(tracks.filter((t) => t.liked).map((t) => t.id)));
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_LIKED), JSON.stringify(tracks.filter((t) => t.liked).map((t) => t.id)));
 }
 
 function loadLikedTracks() {
   try {
-    const data = localStorage.getItem(STORAGE_KEY_LIKED);
+    tracks.forEach((track) => { track.liked = false; });
+    const data = localStorage.getItem(accountStorageKey(STORAGE_KEY_LIKED));
     if (data) {
       const ids = new Set((JSON.parse(data) as unknown[]).map(normalizeTrackId).filter(Boolean) as TrackId[]);
       tracks.forEach((t) => { t.liked = ids.has(t.id); });
@@ -2660,47 +2869,88 @@ function saveSettings() {
     scale: (document.getElementById("scaleSlider") as HTMLInputElement)?.value ?? "100",
     normalize: (document.getElementById("normalizeToggle") as HTMLInputElement)?.checked ?? false,
     crossfade: (document.getElementById("crossfadeToggle") as HTMLInputElement)?.checked ?? false,
+    autoplay: (document.getElementById("autoplayToggle") as HTMLInputElement)?.checked ?? true,
+    prefetch: (document.getElementById("prefetchToggle") as HTMLInputElement)?.checked ?? true,
+    compact: (document.getElementById("compactToggle") as HTMLInputElement)?.checked ?? false,
+    reduceMotion: (document.getElementById("reduceMotionToggle") as HTMLInputElement)?.checked ?? false,
+    accent: (document.getElementById("accentSelect") as HTMLSelectElement)?.value ?? "violet",
   };
-  localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(s));
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_SETTINGS), JSON.stringify(s));
   savedSettings = s;
 }
 
 function loadSettings() {
+  savedSettings = null;
   try {
-    const data = localStorage.getItem(STORAGE_KEY_SETTINGS);
+    const data = localStorage.getItem(accountStorageKey(STORAGE_KEY_SETTINGS));
     if (data) savedSettings = JSON.parse(data);
   } catch { /* ignore */ }
 }
 
+function saveEqualizerState() {
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_EQUALIZER), JSON.stringify(equalizerState));
+}
+
+function loadEqualizerState() {
+  equalizerState = { ...DEFAULT_EQUALIZER, gains: [...DEFAULT_EQUALIZER.gains] };
+  try {
+    const raw = localStorage.getItem(accountStorageKey(STORAGE_KEY_EQUALIZER));
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<EqualizerState>;
+      const gains = Array.isArray(parsed.gains) && parsed.gains.length === EQ_FREQUENCIES.length
+        ? parsed.gains.map((gain) => Math.max(-12, Math.min(12, Number(gain) || 0)))
+        : [...DEFAULT_EQUALIZER.gains];
+      equalizerState = {
+        enabled: Boolean(parsed.enabled),
+        preset: parsed.preset && parsed.preset in EQ_PRESETS ? parsed.preset : "flat",
+        gains,
+      };
+    }
+  } catch { /* ignore malformed local state */ }
+  applyEqualizerGains();
+}
+
+function getProfilePreferences(): ProfilePreferences {
+  try {
+    const raw = localStorage.getItem(accountStorageKey(STORAGE_KEY_PROFILE_PREFERENCES));
+    if (raw) return { ...DEFAULT_PROFILE_PREFERENCES, ...(JSON.parse(raw) as Partial<ProfilePreferences>) };
+  } catch { /* ignore malformed local state */ }
+  return { ...DEFAULT_PROFILE_PREFERENCES };
+}
+
+function saveProfilePreferences(preferences: ProfilePreferences) {
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_PROFILE_PREFERENCES), JSON.stringify(preferences));
+}
+
 function savePlaylistTrackAssign() {
-  localStorage.setItem(STORAGE_KEY_PLTRACKS, JSON.stringify(playlistTrackAssign));
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_PLTRACKS), JSON.stringify(playlistTrackAssign));
 }
 
 function loadPlaylistTrackAssign() {
   try {
-    const data = localStorage.getItem(STORAGE_KEY_PLTRACKS);
+    const data = localStorage.getItem(accountStorageKey(STORAGE_KEY_PLTRACKS));
     if (data) playlistTrackAssign = normalizeStoredPlaylistTracks(JSON.parse(data));
   } catch { /* ignore */ }
 }
 
 function savePlaylistTrackRemoved() {
-  localStorage.setItem(STORAGE_KEY_PLREMOVED, JSON.stringify(playlistTrackRemoved));
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_PLREMOVED), JSON.stringify(playlistTrackRemoved));
 }
 
 function loadPlaylistTrackRemoved() {
   try {
-    const data = localStorage.getItem(STORAGE_KEY_PLREMOVED);
+    const data = localStorage.getItem(accountStorageKey(STORAGE_KEY_PLREMOVED));
     if (data) playlistTrackRemoved = normalizeStoredPlaylistTracks(JSON.parse(data));
   } catch { /* ignore */ }
 }
 
 function savePlaylistOrder() {
-  localStorage.setItem(STORAGE_KEY_PLORDER, JSON.stringify(playlistOrder));
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_PLORDER), JSON.stringify(playlistOrder));
 }
 
 function loadPlaylistOrder() {
   try {
-    const data = localStorage.getItem(STORAGE_KEY_PLORDER);
+    const data = localStorage.getItem(accountStorageKey(STORAGE_KEY_PLORDER));
     if (data) {
       playlistOrder = JSON.parse(data);
       if (playlistOrder.length === playlists.length) {
@@ -2713,12 +2963,12 @@ function loadPlaylistOrder() {
 
 function saveUserPlaylists() {
   const userPlaylists = playlists.filter((p) => p.userCreated);
-  localStorage.setItem(STORAGE_KEY_USER_PLAYLISTS, JSON.stringify(userPlaylists));
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_USER_PLAYLISTS), JSON.stringify(userPlaylists));
 }
 
 function loadUserPlaylists() {
   try {
-    const data = localStorage.getItem(STORAGE_KEY_USER_PLAYLISTS);
+    const data = localStorage.getItem(accountStorageKey(STORAGE_KEY_USER_PLAYLISTS));
     if (!data) return;
     const userPlaylists: PlaylistDef[] = JSON.parse(data);
     userPlaylists.forEach((pl) => {
@@ -2734,6 +2984,29 @@ function loadUserPlaylists() {
       });
     });
   } catch { /* ignore */ }
+}
+
+let hydratedAccountId: number | string | null = null;
+
+function hydrateAccountState(force = false) {
+  const accountId = (currentAuthUser || getStoredAuthUser())?.id ?? "guest";
+  if (!force && hydratedAccountId === accountId) return;
+  hydratedAccountId = accountId;
+  for (let index = playlists.length - 1; index >= 0; index--) {
+    if (playlists[index].userCreated) playlists.splice(index, 1);
+  }
+  playlistTrackAssign = {};
+  playlistTrackRemoved = {};
+  playlistOrder = [];
+  loadLikedTracks();
+  loadSettings();
+  loadEqualizerState();
+  loadPlaylistTrackAssign();
+  loadPlaylistTrackRemoved();
+  loadUserPlaylists();
+  loadPlaylistOrder();
+  applySettingsEffects();
+  renderSidebarPlaylists();
 }
 
 function createUserPlaylist(name: string): PlaylistDef | null {
@@ -3080,6 +3353,7 @@ function isHlsPlaybackUrl(sourceUrl: string) {
 function startAudio(track: Track) {
   const sourceUrl = getTrackPlaybackUrl(track);
   if (!sourceUrl) return;
+  if (equalizerState.enabled) void ensureAudioGraph();
 
   if (activeAudioTrackId === track.id && (audioEl.src || hlsPlayer)) {
     player.playing = true;
@@ -3218,6 +3492,7 @@ audioEl.addEventListener("playing", () => {
   clearPlaybackBuffering();
   player.playing = true;
   updatePlayIcon();
+  window.setTimeout(prepareNextQueuedTrack, 450);
 });
 
 audioEl.addEventListener("waiting", () => {
@@ -3283,7 +3558,7 @@ audioEl.addEventListener("ended", () => {
     startAudio(track);
     return;
   }
-  if (player.queue.length > 0) {
+  if (getPlayerSettings().autoplay && player.queue.length > 0) {
     playNext(true);
     return;
   }
@@ -3304,6 +3579,7 @@ audioEl.addEventListener("error", () => {
 // ----------------------------------------------------------------
 
 // Шапка
+document.getElementById("hdrEqualizer")?.addEventListener("click", showEqualizerModal);
 ["hdrHome","hdrExplore","hdrFav","hdrNotifications","hdrRadio","hdrProfile","hdrSettings"].forEach((id) => {
   document.getElementById(id)?.addEventListener("click", () => {
     const map: Record<string, string> = { hdrHome:"home", hdrExplore:"explore", hdrFav:"favorites", hdrNotifications:"notifications", hdrRadio:"radio", hdrProfile:"profile", hdrSettings:"settings" };
@@ -3324,6 +3600,9 @@ Object.entries(mobileNavigation).forEach(([id, page]) => {
 document.getElementById("mobileSearch")?.addEventListener("click", () => {
   searchInput.focus();
   searchInput.select();
+});
+document.querySelectorAll<HTMLButtonElement>("[data-sidebar-page]").forEach((button) => {
+  button.addEventListener("click", () => switchPage(button.dataset.sidebarPage || "home"));
 });
 
 // ----------------------------------------------------------------
@@ -3376,36 +3655,41 @@ function updateSidebarActiveState() {
     el.classList.toggle("is-active", currentPage === "playlist" && el.getAttribute("data-playlist") === currentPlaylistId);
   });
   document.getElementById("likedTracks")?.classList.toggle("is-active", currentPage === "favorites");
+  document.querySelectorAll<HTMLElement>("[data-sidebar-page]").forEach((button) => {
+    const page = button.dataset.sidebarPage;
+    button.classList.toggle("is-active", page === currentPage || (page === "radio" && currentPage === "station"));
+  });
 }
 
-const createPlaylistBtn = document.getElementById("createPlaylistBtn")!;
-const createPlaylistForm = document.getElementById("createPlaylistForm")! as HTMLFormElement;
-const newPlaylistName = document.getElementById("newPlaylistName")! as HTMLInputElement;
-const cancelPlaylistBtn = document.getElementById("cancelPlaylistBtn")!;
-const playlistFormError = document.getElementById("playlistFormError")!;
+const createPlaylistBtn = document.getElementById("createPlaylistBtn") as HTMLButtonElement | null;
+const createPlaylistForm = document.getElementById("createPlaylistForm") as HTMLFormElement | null;
+const newPlaylistName = document.getElementById("newPlaylistName") as HTMLInputElement | null;
+const cancelPlaylistBtn = document.getElementById("cancelPlaylistBtn") as HTMLButtonElement | null;
+const playlistFormError = document.getElementById("playlistFormError") as HTMLElement | null;
 
 function setPlaylistFormError(message = "") {
+  if (!playlistFormError) return;
   playlistFormError.textContent = message;
   playlistFormError.classList.toggle("hidden", !message);
 }
 
-createPlaylistBtn.addEventListener("click", () => {
-  createPlaylistForm.classList.toggle("hidden");
-  createPlaylistBtn.setAttribute("aria-expanded", String(!createPlaylistForm.classList.contains("hidden")));
+createPlaylistBtn?.addEventListener("click", () => {
+  createPlaylistForm?.classList.toggle("hidden");
+  createPlaylistBtn?.setAttribute("aria-expanded", String(!createPlaylistForm?.classList.contains("hidden")));
   setPlaylistFormError();
-  if (!createPlaylistForm.classList.contains("hidden")) newPlaylistName.focus();
+  if (!createPlaylistForm?.classList.contains("hidden")) newPlaylistName?.focus();
 });
 
-cancelPlaylistBtn.addEventListener("click", () => {
-  createPlaylistForm.classList.add("hidden");
-  createPlaylistBtn.setAttribute("aria-expanded", "false");
-  newPlaylistName.value = "";
+cancelPlaylistBtn?.addEventListener("click", () => {
+  createPlaylistForm?.classList.add("hidden");
+  createPlaylistBtn?.setAttribute("aria-expanded", "false");
+  if (newPlaylistName) newPlaylistName.value = "";
   setPlaylistFormError();
 });
 
-createPlaylistForm.addEventListener("submit", (e) => {
+createPlaylistForm?.addEventListener("submit", (e) => {
   e.preventDefault();
-  const cleanName = newPlaylistName.value.trim().replace(/\s+/g, " ");
+  const cleanName = (newPlaylistName?.value || "").trim().replace(/\s+/g, " ");
   if (!cleanName) { setPlaylistFormError("Введите название плейлиста"); return; }
   if (playlists.some((pl) => pl.name.toLowerCase() === cleanName.toLowerCase())) {
     setPlaylistFormError("Плейлист с таким названием уже есть");
@@ -3413,9 +3697,9 @@ createPlaylistForm.addEventListener("submit", (e) => {
   }
   const playlist = createUserPlaylist(cleanName);
   if (!playlist) { setPlaylistFormError("Не удалось создать плейлист"); return; }
-  newPlaylistName.value = "";
-  createPlaylistForm.classList.add("hidden");
-  createPlaylistBtn.setAttribute("aria-expanded", "false");
+  if (newPlaylistName) newPlaylistName.value = "";
+  createPlaylistForm?.classList.add("hidden");
+  createPlaylistBtn?.setAttribute("aria-expanded", "false");
   setPlaylistFormError();
   renderSidebarPlaylists();
   switchPage("playlist", playlist.id);
@@ -3438,8 +3722,8 @@ prevBtn.addEventListener("click", () => playPrev());
 nextBtn.addEventListener("click", () => playNext());
 likeBtn.addEventListener("click", toggleLike);
 
-const addToPlaylistBtn = document.getElementById("addToPlaylistBtn")!;
-addToPlaylistBtn.addEventListener("click", (e) => {
+const addToPlaylistBtn = document.getElementById("addToPlaylistBtn");
+addToPlaylistBtn?.addEventListener("click", (e) => {
   showPlaylistPopup(e.currentTarget as HTMLElement, player.currentTrackId);
 });
 
@@ -3634,20 +3918,28 @@ document.addEventListener("keydown", (e) => {
   if (e.code === "ArrowLeft") { e.preventDefault(); playPrev(); }
 });
 
+let hoverPrepareTimer: number | null = null;
+document.addEventListener("pointerover", (event) => {
+  const row = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>("[data-id], [data-radio-track]") : null;
+  if (row && event.relatedTarget instanceof Node && row.contains(event.relatedTarget)) return;
+  const trackId = normalizeTrackId(row?.getAttribute("data-id") || row?.getAttribute("data-radio-track"));
+  if (!trackId) return;
+  if (hoverPrepareTimer !== null) window.clearTimeout(hoverPrepareTimer);
+  hoverPrepareTimer = window.setTimeout(() => prepareTrackInBackground(trackId), 500);
+});
+document.addEventListener("pointerout", (event) => {
+  if (!(event.target instanceof HTMLElement)) return;
+  const row = event.target.closest<HTMLElement>("[data-id], [data-radio-track]");
+  if (!row || (event.relatedTarget instanceof Node && row.contains(event.relatedTarget))) return;
+  if (hoverPrepareTimer !== null) window.clearTimeout(hoverPrepareTimer);
+  hoverPrepareTimer = null;
+});
+
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
-loadLikedTracks();
-loadSettings();
-loadPlaylistTrackAssign();
-loadPlaylistTrackRemoved();
-loadUserPlaylists();
-loadPlaylistOrder();
-
-applySettingsEffects();
-
-renderSidebarPlaylists();
+hydrateAccountState(true);
 setQueueFromTracks(tracks, tracks[0]?.id ?? "");
 updateVolumeUi();
 if (tracks[0]) loadTrackById(tracks[0].id, false);

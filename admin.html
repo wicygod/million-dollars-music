@@ -8,6 +8,17 @@
     <script type="module" src="/src/admin.ts" defer></script>
   </head>
   <body>
+    <section id="adminAccessGate" class="admin-access-gate" aria-labelledby="adminAccessTitle">
+      <form id="adminAccessForm" class="admin-access-card">
+        <span class="brand-mark">MD</span>
+        <p>Million Dollars Music</p>
+        <h1 id="adminAccessTitle">Admin access</h1>
+        <span>Enter the server admin key. It stays only in this browser session.</span>
+        <label><span>Admin key</span><input id="adminAccessKey" type="password" autocomplete="off" required /></label>
+        <div id="adminAccessError" class="admin-access-error" role="alert"></div>
+        <button type="submit">Open console</button>
+      </form>
+    </section>
     <main class="admin-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -19,6 +30,9 @@
         </div>
         <nav>
           <button class="nav-item is-active" data-target="dashboardPanel">Dashboard</button>
+          <button class="nav-item" data-target="catalogPanel">Catalog Health</button>
+          <button class="nav-item" data-target="activityPanel">Activity</button>
+          <button class="nav-item" data-target="cachePanel">Audio Cache</button>
           <button class="nav-item" data-target="logsPanel">Live Logs</button>
           <button class="nav-item" data-target="topTracksPanel">Top Tracks</button>
           <button class="nav-item" data-target="helpdeskPanel">Helpdesk</button>
@@ -35,9 +49,16 @@
             <p>Million Dollars Music</p>
             <h1>Server Operations</h1>
           </div>
-          <div class="host-card">
-            <span>Host</span>
-            <strong id="hostName">hiplet</strong>
+          <div class="topbar-actions">
+            <div class="refresh-state">
+              <span>Last sync</span>
+              <strong id="lastSync">Waiting…</strong>
+            </div>
+            <button id="refreshAll" class="refresh-button" type="button">Refresh now</button>
+            <div class="host-card">
+              <span>Host</span>
+              <strong id="hostName">hiplet</strong>
+            </div>
           </div>
         </header>
 
@@ -73,6 +94,93 @@
             <strong id="playsValue">0</strong>
             <p class="muted"><span id="bannedValue">0</span> banned</p>
           </article>
+        </section>
+
+        <section class="operations-grid">
+          <article class="panel catalog-panel" id="catalogPanel">
+            <div class="panel-title">
+              <div>
+                <span class="eyebrow">CONTENT PIPELINE</span>
+                <h2>Catalog Health</h2>
+              </div>
+              <span id="catalogHealth" class="health-badge">Checking</span>
+            </div>
+            <div class="ops-metric-grid">
+              <div class="ops-metric"><span>Total tracks</span><strong id="catalogTracks">0</strong></div>
+              <div class="ops-metric"><span>Playable</span><strong id="catalogPlayable">0%</strong></div>
+              <div class="ops-metric"><span>Artists</span><strong id="catalogArtists">0</strong></div>
+              <div class="ops-metric warning"><span>Needs review</span><strong id="catalogReview">0</strong></div>
+              <div class="ops-metric warning"><span>Missing covers</span><strong id="catalogCovers">0</strong></div>
+              <div class="ops-metric"><span>Catalog length</span><strong id="catalogHours">0h</strong></div>
+            </div>
+            <div class="catalog-foot">
+              <div>
+                <span class="section-label">Source mix</span>
+                <div id="sourceMix" class="source-mix"><span class="muted">No source data</span></div>
+              </div>
+              <div>
+                <span class="section-label">Community</span>
+                <div id="communityMetrics" class="community-metrics"></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel cache-panel" id="cachePanel">
+            <div class="panel-title">
+              <div>
+                <span class="eyebrow">PLAYBACK STORAGE</span>
+                <h2>Audio Cache</h2>
+              </div>
+              <span id="cacheState" class="health-badge">Idle</span>
+            </div>
+            <div class="cache-usage">
+              <div class="cache-ring" id="cacheRing"><strong id="cachePercent">0%</strong></div>
+              <div>
+                <strong id="cacheBytes">0 MB / 0 MB</strong>
+                <p><span id="cacheFiles">0</span> ready · <span id="cacheBuilding">0</span> building</p>
+              </div>
+            </div>
+            <dl class="cache-details">
+              <div><dt>Free disk</dt><dd id="cacheDiskFree">—</dd></div>
+              <div><dt>Oldest item</dt><dd id="cacheOldest">—</dd></div>
+              <div><dt>Inactive &gt;24h</dt><dd id="cacheStale">0</dd></div>
+            </dl>
+            <div class="cache-actions">
+              <select id="cacheMaxAge" aria-label="Inactive cache age">
+                <option value="24">Older than 24 hours</option>
+                <option value="72">Older than 3 days</option>
+                <option value="168">Older than 7 days</option>
+              </select>
+              <button id="pruneCache" type="button">Remove inactive</button>
+            </div>
+            <p class="cache-note">Active and currently building audio is never removed.</p>
+          </article>
+        </section>
+
+        <section class="panel activity-panel" id="activityPanel">
+          <div class="panel-title">
+            <div>
+              <span class="eyebrow">ROLLING 60 MINUTES</span>
+              <h2>Playback & Request Activity</h2>
+            </div>
+            <span id="activityTotal">0 events</span>
+          </div>
+          <div class="activity-summary">
+            <div><span>Stream starts</span><strong id="activityStreams">0</strong></div>
+            <div><span>Searches</span><strong id="activitySearches">0</strong></div>
+            <div><span>Admin actions</span><strong id="activityAdmin">0</strong></div>
+            <div class="alert"><span>Alerts</span><strong id="activityAlerts">0</strong></div>
+          </div>
+          <div class="activity-columns">
+            <div>
+              <span class="section-label">Recent streams</span>
+              <div id="recentStreams" class="activity-feed"></div>
+            </div>
+            <div>
+              <span class="section-label">Recent alerts</span>
+              <div id="recentAlerts" class="activity-feed"></div>
+            </div>
+          </div>
         </section>
 
         <section class="main-grid">
