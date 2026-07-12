@@ -379,7 +379,7 @@ function beginPlaybackBuffering(token: number) {
     player.playing = false;
     updatePlayIcon();
     showTrackNotice("Сервер не ответил. Попробуйте ещё раз");
-  }, 12000);
+  }, 35000);
 }
 
 function getTrackPlaybackUrl(track: Track): string | null {
