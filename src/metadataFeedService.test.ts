@@ -36,7 +36,7 @@ function installCachedFeed(track: Track): void {
     loadedAt: Date.now(),
   };
   vi.stubGlobal("localStorage", {
-    getItem: (key: string) => key === "mm_metadata_feed_cache_v3" ? JSON.stringify(feed) : null,
+    getItem: (key: string) => key === "mm_metadata_feed_cache_v4" ? JSON.stringify(feed) : null,
     setItem: vi.fn(),
   });
 }

@@ -63,7 +63,7 @@ interface TrackSeed {
   icon: string;
 }
 
-const FEED_CACHE_KEY = "mm_metadata_feed_cache_v3";
+const FEED_CACHE_KEY = "mm_metadata_feed_cache_v4";
 const FEED_TTL_MS = 45 * 60 * 1000;
 
 export const LEGACY_TRACK_ID_MAP: Record<string, string> = {

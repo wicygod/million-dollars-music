@@ -3,6 +3,7 @@ import { EqualizerEngine, DEFAULT_EQUALIZER, EQ_FREQUENCIES, EQ_PRESETS, equaliz
 import { applyHistorySummaryToProfile, pluralizeTracks } from "./features/profile";
 import { filterLocalSearchTracks, highlightMatch } from "./features/search";
 import { ACCENT_COLORS, DEFAULT_SETTINGS, settingSwitch, type PlayerSettings } from "./features/settings";
+import { PlaybackCycleGate } from "./features/playbackHistory";
 import { loadHlsConstructor, type HlsPlayer } from "./player/hlsLoader";
 import { disableNativeContextMenu } from "./contextMenu";
 import {
@@ -318,8 +319,7 @@ function resetPlayerForNewAccount() {
   player.currentTrackId = "";
   player.queue = [];
   player.queueIndex = -1;
-  lastHistoryTrackId = null;
-  lastHistoryRecordedAt = 0;
+  playbackHistoryGate.reset();
 
   document.querySelector<HTMLButtonElement>(".queue-close")?.click();
   if (focusOverlay.classList.contains("active")) closeFocusPlayer();
@@ -461,8 +461,7 @@ function getCurrentDuration(track: Track): number {
   return Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : track.duration;
 }
 
-let lastHistoryTrackId: TrackId | null = null;
-let lastHistoryRecordedAt = 0;
+const playbackHistoryGate = new PlaybackCycleGate();
 let listeningClockStartedAt: number | null = null;
 let pendingListeningMilliseconds = 0;
 let listeningSyncInFlight = false;
@@ -530,10 +529,8 @@ function pushRecentTrack(track: Track) {
 function recordActiveTrackPlay() {
   const trackId = activeAudioTrackId;
   if (!trackId) return;
-  const now = Date.now();
-  if (lastHistoryTrackId === trackId && now - lastHistoryRecordedAt < 30_000) return;
-  lastHistoryTrackId = trackId;
-  lastHistoryRecordedAt = now;
+  const playbackCycle = playbackHistoryGate.claim();
+  if (playbackCycle === null) return;
 
   const localTrack = getTrack(trackId);
   if (localTrack) pushRecentTrack(localTrack);
@@ -544,7 +541,7 @@ function recordActiveTrackPlay() {
       if (updatedTrack) pushRecentTrack(updatedTrack);
     })
     .catch(() => {
-      lastHistoryTrackId = null;
+      playbackHistoryGate.release(playbackCycle);
     });
 }
 
@@ -3413,10 +3410,13 @@ function isHlsPlaybackUrl(sourceUrl: string) {
   return /\.m3u8(?:$|\?)/i.test(sourceUrl);
 }
 
-function startAudio(track: Track) {
+function startAudio(track: Track, beginNewCycle = false) {
   if (equalizerState.enabled) void ensureAudioGraph();
 
-  if (activeAudioTrackId === track.id && (audioEl.src || hlsPlayer)) {
+  const hasActiveSource = activeAudioTrackId === track.id && Boolean(audioEl.src || hlsPlayer);
+  if (!hasActiveSource || beginNewCycle) playbackHistoryGate.begin();
+
+  if (hasActiveSource) {
     player.playing = true;
     beginPlaybackBuffering(playbackToken);
     playLoadedAudio(playbackToken);
@@ -3631,7 +3631,7 @@ audioEl.addEventListener("ended", () => {
   const track = getTrack(player.currentTrackId);
   if (player.repeat && track) {
     audioEl.currentTime = 0;
-    startAudio(track);
+    startAudio(track, true);
     return;
   }
   if (getPlayerSettings().autoplay && player.queue.length > 0) {
