@@ -14,6 +14,7 @@ import {
   getArtistTracks,
   getAuthToken,
   getHistorySummary,
+  getUserFavorites,
   getStoredAuthUser,
   getTrack as fetchTrack,
   loginAccount,
@@ -23,6 +24,7 @@ import {
   registerAccount,
   searchCatalog,
   submitBugReport,
+  setUserFavorite,
   type AuthUser,
   updateAvatar,
   updateNickname,
@@ -55,14 +57,11 @@ interface PlaylistDef {
   userCreated?: boolean;
 }
 
-const playlists: PlaylistDef[] = [
-  { id: "focus", name: "Focus Flow", description: "Глубокий эмбиент и лоу-фай для продуктивной работы", gradient: "from-emerald-600 to-teal-900", icon: "🎧", genreFilter: ["lofi", "classical"] },
-  { id: "late", name: "Late Nights", description: "Джаз, R&B и лоу-фай для ночных размышлений", gradient: "from-indigo-700 to-purple-900", icon: "🌙", genreFilter: ["jazz", "lofi"] },
-  { id: "energy", name: "Energy Boost", description: "Мощный рок, электроника и хип-хоп для заряда", gradient: "from-red-600 to-orange-800", icon: "⚡", genreFilter: ["rock", "electronic", "hiphop"] },
-  { id: "chill", name: "Chill Vibes", description: "Расслабляющие мелодии для отдыха", gradient: "from-cyan-600 to-blue-900", icon: "🧘", genreFilter: ["lofi", "jazz"] },
-  { id: "indie", name: "Indie Mix", description: "Инди-поп и альтернатива", gradient: "from-pink-600 to-rose-900", icon: "🎵", genreFilter: ["pop"] },
-  { id: "piano", name: "Piano", description: "Классические фортепианные произведения", gradient: "from-stone-600 to-zinc-900", icon: "🎹", genreFilter: ["classical"] },
-];
+// Only user-created, per-account playlists live here. Editorial discovery is
+// handled by radio/mixes and must not leak into the user's personal library.
+const playlists: PlaylistDef[] = [];
+const LEGACY_EDITORIAL_PLAYLIST_IDS = new Set(["focus", "late", "energy", "chill", "indie", "piano"]);
+const LEGACY_EDITORIAL_PLAYLIST_NAMES = new Set(["focus flow", "late nights", "energy boost", "chill vibes", "indie mix", "piano"]);
 
 const genres = [
   { id: "rock", name: "Рок", gradient: "from-red-600 to-orange-700", description: "Драйв, гитары, энергия" },
@@ -184,6 +183,38 @@ function getTrack(id: TrackId | null | undefined): Track | undefined {
   return tracks.find((t) => t.id === id);
 }
 
+function metadataTrackCollections(): Track[][] {
+  return [
+    metadataFeed.recent,
+    metadataFeed.random,
+    metadataFeed.trending,
+    metadataFeed.top,
+    metadataFeed.mood,
+    metadataFeed.ru,
+    metadataFeed.global,
+    metadataFeed.all,
+  ];
+}
+
+function setTrackLikedState(trackId: TrackId, liked: boolean): void {
+  tracks.forEach((track) => {
+    if (track.id === trackId) track.liked = liked;
+  });
+  metadataTrackCollections().forEach((collection) => collection.forEach((track) => {
+    if (track.id === trackId) track.liked = liked;
+  }));
+}
+
+function updateRenderedLikeButtons(trackId: TrackId, liked: boolean): void {
+  document.querySelectorAll<HTMLButtonElement>(`[data-track-id="${CSS.escape(String(trackId))}"][aria-pressed]`).forEach((button) => {
+    button.setAttribute("aria-pressed", String(liked));
+    button.setAttribute("aria-label", liked ? "Убрать из избранного" : "Добавить в избранное");
+    button.classList.toggle("text-red-400", liked);
+    button.classList.toggle("text-white/30", !liked);
+    button.querySelector("svg")?.setAttribute("fill", liked ? "currentColor" : "none");
+  });
+}
+
 function mergeTracks(nextTracks: Track[]): Track[] {
   const likedIds = new Set(tracks.filter((track) => track.liked).map((track) => track.id));
   const byId = new Map(tracks.map((track) => [track.id, track]));
@@ -195,7 +226,7 @@ function mergeTracks(nextTracks: Track[]): Track[] {
 }
 
 function canPlayTrack(track: Track | undefined): track is Track {
-  return Boolean(track && (track.audioSrc || track.sourceUrl));
+  return Boolean(track?.isPlayable && (track.audioSrc || track.sourceUrl));
 }
 
 function normalizeTrackId(value: unknown): TrackId | null {
@@ -458,7 +489,10 @@ function runQueuedTrackPreparation() {
 
 function schedulePopularTrackWarmup(items: Track[]) {
   if (!getPlayerSettings().prefetch || !getAuthToken()) return;
-  items.slice(0, 6).forEach((track) => {
+  // A single low-priority candidate is enough on the 1 vCPU test server.
+  // Preparing six full MP3 files on page load starved the track the user
+  // actually selected.
+  items.slice(0, 1).forEach((track) => {
     if (!/^\d+$/.test(String(track.id)) || preparedTrackIds.has(track.id)) return;
     if (activePreparationTrackId === track.id || warmupPreparationTrackIds.includes(track.id)) return;
     warmupPreparationTrackIds.push(track.id);
@@ -549,6 +583,11 @@ window.setInterval(() => {
   if (!audioEl.paused && activeAudioTrackId) void flushListeningProgress();
 }, 10_000);
 
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) void flushListeningProgress();
+});
+window.addEventListener("pagehide", () => { void flushListeningProgress(); });
+
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
@@ -630,7 +669,10 @@ function updateAllTimelines() {
 
 function updateActiveTrackHighlight() {
   document.querySelectorAll<HTMLElement>("[data-id]").forEach((el) => {
-    el.classList.toggle("is-playing", el.getAttribute("data-id") === String(player.currentTrackId));
+    const active = el.getAttribute("data-id") === String(player.currentTrackId);
+    el.classList.toggle("is-playing", active);
+    if (active) el.setAttribute("aria-current", "true");
+    else el.removeAttribute("aria-current");
   });
 }
 
@@ -679,6 +721,8 @@ function updateLikeButton() {
   focusLikeBtn.classList.toggle("text-white/30", !liked);
   likeBtn.setAttribute("aria-pressed", String(liked));
   focusLikeBtn.setAttribute("aria-pressed", String(liked));
+  likeBtn.querySelector("svg")?.setAttribute("fill", liked ? "currentColor" : "none");
+  focusLikeBtn.querySelector("svg")?.setAttribute("fill", liked ? "currentColor" : "none");
   const label = liked ? "Убрать текущий трек из избранного" : "Добавить текущий трек в избранное";
   likeBtn.setAttribute("aria-label", label);
   focusLikeBtn.setAttribute("aria-label", label);
@@ -687,19 +731,20 @@ function updateLikeButton() {
 function toggleLike() {
   const track = getTrack(player.currentTrackId);
   if (!track) return;
-  track.liked = !track.liked;
-  updateLikeButton();
-  if (currentPage === "favorites") renderFavorites();
-  saveLikedTracks();
+  toggleTrackLike(track.id);
 }
 
 function toggleTrackLike(trackId: TrackId) {
   const track = getTrack(trackId);
   if (!track) return;
-  track.liked = !track.liked;
+  setTrackLikedState(trackId, !track.liked);
+  updateRenderedLikeButtons(trackId, track.liked);
   if (trackId === player.currentTrackId) updateLikeButton();
   if (currentPage === "favorites") renderFavorites();
   saveLikedTracks();
+  if (/^\d+$/.test(String(trackId)) && getAuthToken()) {
+    void setUserFavorite(trackId, track.liked).catch(() => undefined);
+  }
 }
 
 // ----------------------------------------------------------------
@@ -710,9 +755,13 @@ let currentPage = "home";
 let currentPageParam: string | null = null;
 let currentPlaylistId: string | null = null;
 let searchRequestToken = 0;
+let metadataFeedGeneration = 0;
+let recentScrollbarCleanup: (() => void) | null = null;
 
 function switchPage(pageId: string, extraParam: string | null = null, preserveScroll = false) {
   const content = document.getElementById("appContent")!;
+  recentScrollbarCleanup?.();
+  recentScrollbarCleanup = null;
   const previousScrollTop = content.scrollTop;
   currentPage = pageId;
   currentPageParam = extraParam;
@@ -786,9 +835,10 @@ function applyMetadataFeed(feed: MetadataFeed) {
   switchPage(currentPage, currentPageParam, true);
 }
 
-function refreshMetadataFeed(attempt = 1) {
+function refreshMetadataFeed(attempt = 1, generation = metadataFeedGeneration) {
   loadHomeFeed()
     .then((feed) => {
+      if (generation !== metadataFeedGeneration) return;
       const signature = (items: Track[]) => items.map((track) => `${track.id}:${track.title}:${track.artist}`).join("|");
       const currentSignature = [
         signature(tracks),
@@ -809,11 +859,13 @@ function refreshMetadataFeed(attempt = 1) {
       }
       schedulePopularTrackWarmup(feed.trending.length ? feed.trending : feed.all);
       if (feed.errorMessage && attempt < 8) {
-        window.setTimeout(() => refreshMetadataFeed(attempt + 1), 1500 * attempt);
+        window.setTimeout(() => refreshMetadataFeed(attempt + 1, generation), 1500 * attempt);
       }
     })
     .catch(() => {
-      if (attempt < 8) window.setTimeout(() => refreshMetadataFeed(attempt + 1), 1500 * attempt);
+      if (generation === metadataFeedGeneration && attempt < 8) {
+        window.setTimeout(() => refreshMetadataFeed(attempt + 1, generation), 1500 * attempt);
+      }
     });
 }
 
@@ -832,6 +884,8 @@ function setAuthFormMode(mode: "login" | "register") {
   overlay.querySelector<HTMLElement>("#authNicknameWrap")?.classList.toggle("hidden", mode !== "register");
   const submit = overlay.querySelector<HTMLButtonElement>("#authSubmitBtn");
   if (submit) submit.textContent = mode === "register" ? "Создать аккаунт" : "Войти";
+  const password = overlay.querySelector<HTMLInputElement>("#authPassword");
+  if (password) password.autocomplete = mode === "register" ? "new-password" : "current-password";
 }
 
 function setAuthError(message = "") {
@@ -943,6 +997,8 @@ function logoutAccount() {
   stopAudio();
   currentAuthUser = null;
   clearAuthToken();
+  hydrateAccountState(true);
+  resetPlayerForNewAccount();
   showAuthScreen();
 }
 
@@ -959,6 +1015,7 @@ function bootstrapAuthenticatedApp() {
     hideAuthScreen();
     switchPage(currentPage || "home", currentPageParam);
     refreshMetadataFeed();
+    void syncFavoritesWithBackend();
   }
   fetchCurrentUser()
     .then((user) => {
@@ -969,6 +1026,7 @@ function bootstrapAuthenticatedApp() {
       if (!restoredFromCache) {
         switchPage(currentPage || "home", currentPageParam);
         refreshMetadataFeed();
+        void syncFavoritesWithBackend();
       } else if (currentPage === "profile") {
         switchPage("profile");
       }
@@ -1020,7 +1078,7 @@ function renderTrackRow(t: Track, index: number, rowClass: string): string {
       <span class="text-xs text-white/30 w-6 text-center">${index + 1}</span>
       ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
       <div class="flex-1 min-w-0">
-        <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+        <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
         <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)} · ${escapeHtml(t.album)}</p>
       </div>
       <button class="row-like-btn playlist-row-btn ${t.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${t.id}" type="button" title="Лайк" aria-label="${t.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(t.title)}" aria-pressed="${String(t.liked)}">
@@ -1102,6 +1160,36 @@ function enhanceDynamicAccessibility(container: HTMLElement) {
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
+function renderCardTrackActions(track: Track): string {
+  return `
+    <div class="track-card-actions">
+      <button class="card-like-btn playlist-row-btn" data-track-id="${track.id}" type="button" title="${track.liked ? "Убрать из избранного" : "Добавить в избранное"}" aria-label="${track.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(track.title)}" aria-pressed="${String(track.liked)}">
+        <svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+      </button>
+      <button class="card-add-btn playlist-row-btn" data-track-id="${track.id}" type="button" title="Добавить в плейлист" aria-label="Добавить в плейлист: ${escapeHtml(track.title)}">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+      </button>
+    </div>
+  `;
+}
+
+function wireCardTrackActions(container: HTMLElement): void {
+  container.querySelectorAll<HTMLElement>(".card-add-btn").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const trackId = getElementTrackId(button, "data-track-id");
+      if (trackId) showPlaylistPopup(button, trackId);
+    });
+  });
+  container.querySelectorAll<HTMLElement>(".card-like-btn").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const trackId = getElementTrackId(button, "data-track-id");
+      if (trackId) toggleTrackLike(trackId);
+    });
+  });
+}
+
 function renderHomeTrackRail(title: string, items: Track[]): string {
   if (!items.length) return "";
   return `
@@ -1115,9 +1203,10 @@ function renderHomeTrackRail(title: string, items: Track[]): string {
           <div class="home-compact-card group cursor-pointer" data-id="${t.id}">
             ${renderCover(t, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}
             <div class="min-w-0 flex-1">
-              <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+              <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
               <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
             </div>
+            ${renderCardTrackActions(t)}
             <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
           </div>
         `).join("")}
@@ -1171,12 +1260,10 @@ function renderHome(container: HTMLElement) {
               `)}
               <div class="flex items-start gap-2">
                 <div class="min-w-0 flex-1">
-                  <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+                  <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
                   <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
                 </div>
-                <button class="card-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-                </button>
+                ${renderCardTrackActions(t)}
               </div>
             </div>
           `).join("")}
@@ -1194,10 +1281,8 @@ function renderHome(container: HTMLElement) {
           <div class="random-card group cursor-pointer border border-white/10 active:scale-[0.98]" data-id="${t.id}" data-track-queue="popular">
             ${renderCover(t, "w-14 h-14 rounded-xl shrink-0 flex items-center justify-center text-2xl")}
             <span class="popular-rank${index < 3 ? " is-top" : ""}" aria-hidden="true">${index + 1}</span>
-            <div class="min-w-0 flex-1"><p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p><p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p></div>
-            <button class="card-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-            </button>
+            <div class="min-w-0 flex-1"><p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p><p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p></div>
+            ${renderCardTrackActions(t)}
             <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
           </div>
         `).join("")}
@@ -1222,13 +1307,7 @@ function renderHome(container: HTMLElement) {
       if (id) activateTrack(el.dataset.trackQueue === "popular" ? popular : tracks, id);
     });
   });
-  container.querySelectorAll<HTMLElement>(".card-add-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const trackId = getElementTrackId(btn, "data-track-id");
-      if (trackId) showPlaylistPopup(btn, trackId);
-    });
-  });
+  wireCardTrackActions(container);
   container.querySelectorAll<HTMLElement>(".card-play-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1243,6 +1322,7 @@ function renderHome(container: HTMLElement) {
   });
   container.querySelector("#homeHeroExplore")?.addEventListener("click", () => switchPage("explore"));
   setupPopularLoadMore(container, popular.length);
+  enhanceDynamicAccessibility(container);
 
   setTimeout(initScrollbar, 50);
 }
@@ -1308,7 +1388,7 @@ function renderExplore(container: HTMLElement) {
           <div class="home-compact-card group cursor-pointer" data-id="${t.id}">
             ${renderCover(t, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}
             <div class="min-w-0 flex-1">
-              <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+              <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
               <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
             </div>
             <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
@@ -1328,7 +1408,7 @@ function renderExplore(container: HTMLElement) {
             <div class="home-compact-card group cursor-pointer" data-id="${t.id}">
               ${renderCover(t, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}
               <div class="min-w-0 flex-1">
-                <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+                <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
                 <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
               </div>
               <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
@@ -1427,7 +1507,7 @@ function renderFavorites() {
       <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
       ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-xs")}
       <div class="flex-1 min-w-0">
-        <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+        <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
         <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
       </div>
       <span class="text-xs text-white/30 w-20 hidden sm:block truncate">${escapeHtml(t.album)}</span>
@@ -1470,6 +1550,7 @@ function renderFavorites() {
       renderFavorites();
     });
   });
+  enhanceDynamicAccessibility(list);
   updateActiveTrackHighlight();
 }
 
@@ -1570,7 +1651,7 @@ function renderRadio(container: HTMLElement) {
       </section>
       <section>
         <div class="radio-section-head"><div><h3>Новые открытия</h3><p>Никаких одинаковых карточек подряд</p></div></div>
-        ${discoveries.length ? `<div class="home-compact-rail">${discoveries.map((track) => `<button class="home-compact-card text-left" type="button" data-radio-track="${track.id}">${renderCover(track, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}<span class="min-w-0 flex-1"><strong class="text-sm font-medium truncate block">${escapeHtml(track.title)}</strong><small class="text-xs text-white/40 truncate block">${escapeHtml(track.artist)}</small></span><span class="text-xs text-white/30">${track.durationLabel}</span></button>`).join("")}</div>` : `<div class="profile-empty-state">Открытия появятся после обновления каталога.</div>`}
+        ${discoveries.length ? `<div class="home-compact-rail">${discoveries.map((track) => `<div class="home-compact-card group text-left" role="button" tabindex="0" data-radio-track="${track.id}" aria-label="Воспроизвести: ${escapeHtml(track.title)} — ${escapeHtml(track.artist)}">${renderCover(track, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}<span class="min-w-0 flex-1"><strong class="track-title-selectable text-sm font-medium truncate block">${escapeHtml(track.title)}</strong><small class="text-xs text-white/40 truncate block">${escapeHtml(track.artist)}</small></span>${renderCardTrackActions(track)}<span class="text-xs text-white/30">${track.durationLabel}</span></div>`).join("")}</div>` : `<div class="profile-empty-state">Открытия появятся после обновления каталога.</div>`}
       </section>
     </div>
   `;
@@ -1595,8 +1676,11 @@ function renderRadio(container: HTMLElement) {
     element.addEventListener("click", () => { const id = element.dataset.station; if (id) switchPage("station", id); });
   });
   container.querySelectorAll<HTMLElement>("[data-radio-track]").forEach((element) => {
-    element.addEventListener("click", () => { const id = normalizeTrackId(element.dataset.radioTrack); if (id) activateTrack(discoveries, id); });
+    const activate = () => { const id = normalizeTrackId(element.dataset.radioTrack); if (id) activateTrack(discoveries, id); };
+    element.addEventListener("click", (event) => { if (!(event.target as HTMLElement).closest("button")) activate(); });
+    element.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && !(event.target as HTMLElement).closest("button")) { event.preventDefault(); activate(); } });
   });
+  wireCardTrackActions(container);
 }
 
 // ----------------------------------------------------------------
@@ -1631,32 +1715,11 @@ function renderStationPage(container: HTMLElement, stationId: string | null) {
     </div>
     <h3 class="text-sm font-semibold tracking-wide mb-3 mt-2">В этом потоке</h3>
     <div class="space-y-1">
-      ${stationTracks.map((t, i) => `
-        <div class="station-track group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99]" data-id="${t.id}">
-          <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
-          ${renderCover(t, "w-8 h-8 rounded-lg shrink-0 flex items-center justify-center text-xs")}
-          <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
-            <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
-          </div>
-          <button class="list-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-          </button>
-          <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
-        </div>
-      `).join("")}
+      ${stationTracks.map((track, index) => renderTrackRow(track, index, "station-track")).join("")}
     </div>
   `;
 
-  container.querySelectorAll<HTMLElement>(".station-track").forEach((el) => {
-    el.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest("button")) return;
-      const id = el.getAttribute("data-id");
-      if (id) {
-        activateTrack(stationTracks, id);
-      }
-    });
-  });
+  wireTrackRows(container, ".station-track", stationTracks, () => renderStationPage(container, stationId));
   const stationPlayBtn = container.querySelector<HTMLButtonElement>("#stationPlayBtn");
   if (stationPlayBtn) {
     stationPlayBtn.disabled = stationTracks.length === 0;
@@ -1666,13 +1729,6 @@ function renderStationPage(container: HTMLElement, stationId: string | null) {
       if (first) activateTrack(stationTracks, first.id);
     });
   }
-  container.querySelectorAll<HTMLElement>(".list-add-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const trackId = getElementTrackId(btn, "data-track-id");
-      if (trackId) showPlaylistPopup(btn, trackId);
-    });
-  });
 }
 
 // ----------------------------------------------------------------
@@ -1681,6 +1737,8 @@ function renderStationPage(container: HTMLElement, stationId: string | null) {
 
 function renderProfile(container: HTMLElement) {
   const user = currentAuthUser || getStoredAuthUser();
+  const renderedAccountId = user?.id ?? null;
+  const isCurrentProfile = () => currentPage === "profile" && (currentAuthUser || getStoredAuthUser())?.id === renderedAccountId;
   const likedCount = tracks.filter((t) => t.liked).length;
   const listenedTracks = metadataFeed.recent;
   const topArtists = [...new Set(listenedTracks.map((t) => t.artist))].slice(0, 4);
@@ -1748,7 +1806,7 @@ function renderProfile(container: HTMLElement) {
     </section>
     <section class="profile-card-v2 mt-3">
       <div class="settings-section-head"><h3>Недавние треки</h3><span>${topTracks.length} последних</span></div>
-      ${hasRealStats ? `<div class="space-y-1">${topTracks.map((track, index) => `<div class="profile-track flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer group" data-id="${track.id}" role="button" tabindex="0"><span class="text-xs text-white/30 w-6 text-center">${index + 1}</span>${renderCover(track, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}<div class="flex-1 min-w-0"><p class="text-sm font-medium truncate">${escapeHtml(track.title)}</p><p class="text-xs text-white/40 truncate">${escapeHtml(track.artist)}</p></div><button class="profile-like-btn playlist-row-btn ${track.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${track.id}" type="button" aria-label="${track.liked ? "Убрать из избранного" : "Добавить в избранное"}"><svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg></button><span class="text-xs text-white/30">${track.durationLabel}</span></div>`).join("")}</div>` : `<div class="profile-empty-state">Недавние треки появятся после первого прослушивания.</div>`}
+      ${hasRealStats ? `<div class="space-y-1">${topTracks.map((track, index) => renderTrackRow(track, index, "profile-track")).join("")}</div>` : `<div class="profile-empty-state">Недавние треки появятся после первого прослушивания.</div>`}
     </section>
     <div class="profile-logout-wrap"><button id="profileLogoutBtn" type="button" class="profile-logout-btn">Выйти из аккаунта</button></div>
   `;
@@ -1758,7 +1816,7 @@ function renderProfile(container: HTMLElement) {
   container.querySelector("#profileEqualizerBtn")?.addEventListener("click", showEqualizerModal);
 
   void flushListeningProgress().then(() => getHistorySummary()).then((summary) => {
-    if (!container.isConnected) return;
+    if (!isCurrentProfile()) return;
     applyHistorySummaryToProfile(summary);
   }).catch(() => { /* keep the locally available fallback */ });
 
@@ -1766,7 +1824,7 @@ function renderProfile(container: HTMLElement) {
     event.preventDefault();
     const nickname = (container.querySelector<HTMLInputElement>("#profileNicknameInput")?.value || "").trim();
     if (!nickname) return;
-    try { currentAuthUser = await updateNickname(nickname); renderProfile(container); showTrackNotice("Профиль обновлён"); }
+    try { currentAuthUser = await updateNickname(nickname); if (isCurrentProfile()) renderProfile(container); showTrackNotice("Профиль обновлён"); }
     catch { showTrackNotice("Не удалось обновить профиль"); }
   });
   container.querySelector<HTMLInputElement>("#profileAvatarInput")?.addEventListener("change", (event) => {
@@ -1774,7 +1832,7 @@ function renderProfile(container: HTMLElement) {
     if (!file) return;
     const reader = new FileReader();
     reader.addEventListener("load", async () => {
-      try { currentAuthUser = await updateAvatar(String(reader.result || "")); renderProfile(container); showTrackNotice("Аватар обновлён"); }
+      try { currentAuthUser = await updateAvatar(String(reader.result || "")); if (isCurrentProfile()) renderProfile(container); showTrackNotice("Аватар обновлён"); }
       catch { showTrackNotice("Не удалось обновить аватар"); }
     });
     reader.readAsDataURL(file);
@@ -1787,19 +1845,7 @@ function renderProfile(container: HTMLElement) {
     element.addEventListener("click", open);
     element.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
-  container.querySelectorAll<HTMLElement>(".profile-track").forEach((element) => {
-    const open = () => { const id = getElementTrackId(element); if (id) activateTrack(tracks, id); };
-    element.addEventListener("click", (event) => { if (!(event.target as HTMLElement).closest("button")) open(); });
-    element.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
-  });
-  container.querySelectorAll<HTMLElement>(".profile-like-btn").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const trackId = getElementTrackId(button, "data-track-id");
-      if (trackId) toggleTrackLike(trackId);
-      renderProfile(container);
-    });
-  });
+  wireTrackRows(container, ".profile-track", topTracks, () => renderProfile(container));
   updateActiveTrackHighlight();
 }
 function renderTrackDetailPage(container: HTMLElement, trackId: string) {
@@ -1822,7 +1868,7 @@ function renderTrackDetailPage(container: HTMLElement, trackId: string) {
         ${renderCover(track, "track-detail-cover flex items-center justify-center text-5xl")}
         <div class="track-detail-copy">
           <p class="text-xs uppercase tracking-widest text-white/45 mb-2">Трек</p>
-          <h2 class="track-detail-title">${escapeHtml(track.title)}</h2>
+          <h2 class="track-detail-title track-title-selectable">${escapeHtml(track.title)}</h2>
           <button class="track-detail-artist" type="button">${escapeHtml(track.artist)}</button>
           <div class="track-detail-meta">
             <span>${track.durationLabel}</span>
@@ -1868,6 +1914,7 @@ function renderTrackDetailPage(container: HTMLElement, trackId: string) {
 
 function renderArtistPage(container: HTMLElement, artistName: string) {
   if (/^\d+$/.test(artistName)) {
+    const isCurrentArtist = () => currentPage === "artist" && currentPageParam === artistName;
     container.innerHTML = `
       <div class="search-loading">
         <div class="track-skeleton"></div>
@@ -1879,6 +1926,7 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
     `;
     Promise.all([fetchArtist(artistName), getArtistTracks(artistName)])
       .then(([artist, backendTracks]) => {
+        if (!isCurrentArtist()) return;
         const artistTracks = mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
         const primary = artistTracks[0];
         container.innerHTML = `
@@ -1910,6 +1958,7 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
         wireTrackRows(container, ".artist-track", artistTracks, () => renderArtistPage(container, artistName));
       })
       .catch(() => {
+        if (!isCurrentArtist()) return;
         container.innerHTML = `
           <div class="playlist-empty py-16 flex flex-col items-center justify-center text-center">
             <div class="text-4xl mb-3">♪</div>
@@ -2054,7 +2103,7 @@ function showEqualizerModal() {
       </div>
 
       <div class="equalizer-toolbar">
-        <div class="equalizer-status"><button class="equalizer-power ${equalizerState.enabled ? "is-on" : ""}" type="button" role="switch" aria-checked="${equalizerState.enabled}"></button><div><strong>${equalizerState.enabled ? "Эквалайзер включён" : "Эквалайзер выключен"}</strong><small>Мгновенное A/B сравнение</small></div></div>
+        <div class="equalizer-status"><button class="equalizer-power ${equalizerState.enabled ? "is-on" : ""}" type="button" role="switch" aria-label="Включить или выключить эквалайзер" aria-checked="${equalizerState.enabled}"></button><div><strong>${equalizerState.enabled ? "Эквалайзер включён" : "Эквалайзер выключен"}</strong><small>Мгновенное A/B сравнение</small></div></div>
         <label class="equalizer-preamp"><span>Предусилитель <output data-eq-preamp-output>${formatEqGain(equalizerState.preamp)}</output></span><input data-eq-preamp type="range" min="-12" max="3" step="0.5" value="${equalizerState.preamp}" /></label>
         <button class="equalizer-reset" type="button">Сбросить</button>
       </div>
@@ -2179,22 +2228,22 @@ function renderSettings(container: HTMLElement) {
         <div class="setting-row"><div><strong>Тёмная тема</strong><small>Глубокий контраст для вечернего прослушивания</small></div>${settingSwitch("themeToggle", s.theme)}</div>
         <div class="setting-row"><div><strong>Компактный режим</strong><small>Больше музыки помещается на экране</small></div>${settingSwitch("compactToggle", s.compact)}</div>
         <div class="setting-row"><div><strong>Меньше анимаций</strong><small>Отключает вращения и плавные перемещения</small></div>${settingSwitch("reduceMotionToggle", s.reduceMotion)}</div>
-        <div class="setting-row"><div><strong>Акцент интерфейса</strong><small>Цвет активных элементов и прогресса</small></div><select id="accentSelect" class="settings-select">
+        <div class="setting-row"><div><strong>Акцент интерфейса</strong><small>Цвет активных элементов и прогресса</small></div><select id="accentSelect" class="settings-select" aria-label="Акцент интерфейса">
           <option value="violet" ${s.accent === "violet" ? "selected" : ""}>Фиолетовый</option>
           <option value="rose" ${s.accent === "rose" ? "selected" : ""}>Розовый</option>
           <option value="cyan" ${s.accent === "cyan" ? "selected" : ""}>Бирюзовый</option>
           <option value="lime" ${s.accent === "lime" ? "selected" : ""}>Лаймовый</option>
         </select></div>
-        <div class="setting-row"><div><strong>Масштаб</strong><small><span id="scaleValue">${s.scale}%</span> от стандартного размера</small></div><input id="scaleSlider" type="range" min="80" max="120" value="${s.scale}" class="w-28 accent-indigo-500" /></div>
+        <div class="setting-row"><div><strong>Масштаб</strong><small><span id="scaleValue">${s.scale}%</span> от стандартного размера</small></div><input id="scaleSlider" type="range" min="80" max="120" value="${s.scale}" class="w-28 accent-indigo-500" aria-label="Масштаб интерфейса" /></div>
       </section>
 
       <section class="settings-card-v2">
         <div class="settings-section-head"><h3>Воспроизведение</h3><span>Поток</span></div>
         <div class="setting-row"><div><strong>Автовоспроизведение</strong><small>Продолжать очередь после окончания трека</small></div>${settingSwitch("autoplayToggle", s.autoplay)}</div>
         <div class="setting-row"><div><strong>Быстрая загрузка следующего</strong><small>Подготавливать следующий трек в фоне</small></div>${settingSwitch("prefetchToggle", s.prefetch)}</div>
-        <div class="setting-row"><div><strong>Нормализация громкости</strong><small>Сглаживать перепады между записями</small></div>${settingSwitch("normalizeToggle", s.normalize)}</div>
+        <div class="setting-row"><div><strong>Компенсация тихой громкости</strong><small>Слегка поднимать уровень на низкой громкости</small></div>${settingSwitch("normalizeToggle", s.normalize)}</div>
         <div class="setting-row"><div><strong>Плавный переход</strong><small>Мягко проявлять звук при смене трека</small></div>${settingSwitch("crossfadeToggle", s.crossfade)}</div>
-        <div class="setting-row"><div><strong>Аудиовыход</strong><small>Устройство, на которое направлен звук</small></div><select id="audioOutputSelect" class="settings-select"><option value="">Системное устройство</option></select></div>
+        <div class="setting-row"><div><strong>Аудиовыход</strong><small>Устройство, на которое направлен звук</small></div><select id="audioOutputSelect" class="settings-select" aria-label="Аудиовыход"><option value="">Системное устройство</option></select></div>
       </section>
 
       <section class="settings-card-v2 is-wide">
@@ -2227,6 +2276,11 @@ function renderSettings(container: HTMLElement) {
   });
 
   const outputSelect = container.querySelector<HTMLSelectElement>("#audioOutputSelect");
+  const sinkAudio = audioEl as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+  if (outputSelect && !sinkAudio.setSinkId) {
+    outputSelect.disabled = true;
+    outputSelect.title = "Выбор аудиоустройства не поддерживается этой версией WebView";
+  }
   navigator.mediaDevices?.enumerateDevices().then((devices) => {
     const outputs = devices.filter((device) => device.kind === "audiooutput");
     outputs.forEach((device, index) => {
@@ -2237,9 +2291,12 @@ function renderSettings(container: HTMLElement) {
     });
   }).catch(() => undefined);
   outputSelect?.addEventListener("change", async () => {
-    const sinkAudio = audioEl as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+    if (!sinkAudio.setSinkId) {
+      showTrackNotice("Выбор аудиоустройства не поддерживается");
+      return;
+    }
     try {
-      await sinkAudio.setSinkId?.(outputSelect.value);
+      await sinkAudio.setSinkId(outputSelect.value);
       showTrackNotice("Аудиовыход изменён");
     } catch {
       showTrackNotice("Не удалось переключить аудиовыход");
@@ -2385,7 +2442,7 @@ function renderPlaylistPage(container: HTMLElement, playlistId: string | null) {
           <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
           ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
           <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+            <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
             <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)} · ${escapeHtml(t.album)}</p>
           </div>
           <button class="add-pl-btn text-white/20 hover:text-indigo-400 transition-all duration-300 opacity-0 group-hover:opacity-100 cursor-pointer ml-1 shrink-0" data-track-id="${t.id}" title="Добавить в плейлист">
@@ -2531,6 +2588,7 @@ function renderPlaylistPage(container: HTMLElement, playlistId: string | null) {
       if (deleteUserPlaylist(playlistId)) switchPage("home");
     });
   }
+  enhanceDynamicAccessibility(container);
   updateActiveTrackHighlight();
 }
 
@@ -2559,26 +2617,11 @@ function renderGenrePage(container: HTMLElement, genreId: string | null) {
     </div>
     <h3 class="text-sm font-semibold tracking-wide mb-3">Треки · ${genreTracks.length}</h3>
     <div class="space-y-1">
-      ${genreTracks.map((t, i) => `
-        <div class="genre-track group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99]" data-id="${t.id}">
-          <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
-          ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
-          <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium truncate">${escapeHtml(t.title)}</p>
-            <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)} · ${escapeHtml(t.album)}</p>
-          </div>
-          <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
-        </div>
-      `).join("")}
+      ${genreTracks.map((track, index) => renderTrackRow(track, index, "genre-track")).join("")}
     </div>
   `;
 
-  container.querySelectorAll<HTMLElement>(".genre-track").forEach((el) => {
-    el.addEventListener("click", () => {
-      const id = getElementTrackId(el);
-      if (id) activateTrack(genreTracks, id);
-    });
-  });
+  wireTrackRows(container, ".genre-track", genreTracks, () => renderGenrePage(container, genreId));
   container.querySelector(".playGenreBtn")?.addEventListener("click", () => {
     if (genreTracks.length > 0) {
       activateTrack(genreTracks, genreTracks[0].id);
@@ -2621,7 +2664,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
             <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
             ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
             <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium truncate">${highlightMatch(t.title, q)}</p>
+              <p class="track-title-selectable text-sm font-medium truncate">${highlightMatch(t.title, q)}</p>
               <p class="text-xs text-white/40 truncate">${highlightMatch(t.artist, q)}</p>
             </div>
             <button class="search-like-btn playlist-row-btn ${t.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${t.id}" type="button" title="Лайк" aria-label="${t.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(t.title)}" aria-pressed="${String(t.liked)}">
@@ -2662,7 +2705,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
   const mapSearchResults = (backendTracks: Awaited<ReturnType<typeof searchCatalog>>) =>
     mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
   const pollHydratedResults = (attempt: number, previousCount: number, stableCount = 0) => {
-    if (attempt > 30 || previousCount >= searchTargetLimit || stableCount >= 15) return;
+    if (attempt > 6 || previousCount >= searchTargetLimit || stableCount >= 3) return;
     window.setTimeout(() => {
       if (!isCurrentSearch()) return;
       searchCatalog(query, searchTargetLimit)
@@ -2677,7 +2720,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
           }
         })
         .catch(() => {});
-    }, attempt < 7 ? 2000 : 4000);
+    }, 2000);
   };
 
   container.innerHTML = `
@@ -2693,7 +2736,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
     if (!isCurrentSearch()) return;
     renderBackendResults(localResults(), "Каталог временно недоступен. Показаны сохранённые результаты.");
   };
-  const searchFallbackTimer = window.setTimeout(showSavedSearchResults, 8000);
+  const searchFallbackTimer = window.setTimeout(showSavedSearchResults, 2500);
   searchCatalog(query, searchTargetLimit)
     .then((backendTracks) => {
       window.clearTimeout(searchFallbackTimer);
@@ -2738,7 +2781,7 @@ function showQueueSheet() {
         ${queuedTracks.length ? queuedTracks.map((track) => `
           <button class="queue-item ${track.id === player.currentTrackId ? "is-current" : ""}" type="button" data-queue-id="${escapeHtml(String(track.id))}" ${track.id === player.currentTrackId ? 'aria-current="true"' : ""}>
             ${renderCover(track, "queue-item-cover w-10 h-10 rounded-xl flex items-center justify-center text-xs")}
-            <span class="queue-item-copy"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}</span></span>
+            <span class="queue-item-copy"><strong class="track-title-selectable">${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}</span></span>
             <span class="queue-item-time tabular-nums">${track.durationLabel}</span>
           </button>
         `).join("") : `<div class="playlist-empty"><strong>Очередь пуста</strong><span>Запустите трек из любой подборки</span></div>`}
@@ -2746,6 +2789,8 @@ function showQueueSheet() {
     </aside>
   `;
   document.body.appendChild(overlay);
+  setFocusBackgroundInert(true);
+  focusOverlay.inert = true;
   queueBtn.setAttribute("aria-expanded", "true");
   const sheet = overlay.querySelector<HTMLElement>(".queue-sheet")!;
   const closeButton = overlay.querySelector<HTMLButtonElement>(".queue-close")!;
@@ -2753,6 +2798,8 @@ function showQueueSheet() {
   function closeQueue() {
     document.removeEventListener("keydown", onKeyDown, true);
     overlay.remove();
+    focusOverlay.inert = false;
+    if (!focusOverlay.classList.contains("active")) setFocusBackgroundInert(false);
     queueBtn.setAttribute("aria-expanded", "false");
     previousFocus.focus();
   }
@@ -2762,7 +2809,14 @@ function showQueueSheet() {
       event.stopPropagation();
       event.stopImmediatePropagation();
       closeQueue();
+      return;
     }
+    if (event.key !== "Tab") return;
+    const focusable = [...sheet.querySelectorAll<HTMLElement>("button:not([disabled])")];
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   }
 
   closeButton.addEventListener("click", closeQueue);
@@ -2827,7 +2881,37 @@ function loadLikedTracks() {
       const ids = new Set((JSON.parse(data) as unknown[]).map(normalizeTrackId).filter(Boolean) as TrackId[]);
       tracks.forEach((t) => { t.liked = ids.has(t.id); });
     }
+    const likedIds = new Set(tracks.filter((track) => track.liked).map((track) => track.id));
+    metadataTrackCollections().forEach((collection) => collection.forEach((track) => {
+      track.liked = likedIds.has(track.id);
+    }));
   } catch { /* ignore */ }
+}
+
+async function syncFavoritesWithBackend(): Promise<void> {
+  if (!getAuthToken()) return;
+  const accountId = (currentAuthUser || getStoredAuthUser())?.id;
+  if (!accountId) return;
+  const generation = metadataFeedGeneration;
+  try {
+    const favorites = await getUserFavorites();
+    if (generation !== metadataFeedGeneration || (currentAuthUser || getStoredAuthUser())?.id !== accountId) return;
+    const backendTracks = mergeTracks(favorites.map((favorite) => mapBackendTrack(favorite.track)));
+    const serverIds = new Set(backendTracks.map((track) => track.id));
+    const localIds = new Set(tracks.filter((track) => track.liked).map((track) => track.id));
+    const likedIds = new Set([...serverIds, ...localIds]);
+    likedIds.forEach((trackId) => setTrackLikedState(trackId, true));
+    saveLikedTracks();
+    updateLikeButton();
+    likedIds.forEach((trackId) => updateRenderedLikeButtons(trackId, true));
+
+    // One-time migration for account-scoped likes created before server sync.
+    await Promise.all([...localIds]
+      .filter((trackId) => /^\d+$/.test(String(trackId)) && !serverIds.has(trackId))
+      .map((trackId) => setUserFavorite(trackId, true).catch(() => undefined)));
+  } catch {
+    // Offline mode keeps the account-scoped local copy and retries next launch.
+  }
 }
 
 function saveSettings() {
@@ -2928,7 +3012,14 @@ function loadUserPlaylists() {
   try {
     const data = localStorage.getItem(accountStorageKey(STORAGE_KEY_USER_PLAYLISTS));
     if (!data) return;
-    const userPlaylists: PlaylistDef[] = JSON.parse(data);
+    const storedPlaylists: PlaylistDef[] = JSON.parse(data);
+    const userPlaylists = storedPlaylists.filter((playlist) => (
+      !LEGACY_EDITORIAL_PLAYLIST_IDS.has(playlist?.id)
+      && !LEGACY_EDITORIAL_PLAYLIST_NAMES.has(String(playlist?.name || "").trim().toLowerCase())
+    ));
+    if (userPlaylists.length !== storedPlaylists.length) {
+      localStorage.setItem(accountStorageKey(STORAGE_KEY_USER_PLAYLISTS), JSON.stringify(userPlaylists));
+    }
     userPlaylists.forEach((pl) => {
       if (!pl?.id || !pl?.name || playlists.some((existing) => existing.id === pl.id)) return;
       playlists.push({
@@ -2949,7 +3040,15 @@ let hydratedAccountId: number | string | null = null;
 function hydrateAccountState(force = false) {
   const accountId = (currentAuthUser || getStoredAuthUser())?.id ?? "guest";
   if (!force && hydratedAccountId === accountId) return;
+  const accountChanged = hydratedAccountId !== accountId;
   hydratedAccountId = accountId;
+  metadataFeedGeneration++;
+  if (accountChanged) {
+    metadataFeed = { ...metadataFeed, recent: [] };
+    pendingListeningMilliseconds = 0;
+    listeningClockStartedAt = null;
+    streamTicketCache.clear();
+  }
   for (let index = playlists.length - 1; index >= 0; index--) {
     if (playlists[index].userCreated) playlists.splice(index, 1);
   }
@@ -3109,13 +3208,16 @@ function showPlaylistPopup(anchor: HTMLElement, trackId: TrackId, onChange?: (pl
     item.className = `pl-popup-item ${assigned ? "is-assigned" : ""}`;
     item.setAttribute("aria-label", `${assigned ? "Уже добавлено: " : "Добавить в "}${pl.name}`);
     item.innerHTML = `<span class="pl-popup-icon">${pl.icon}</span><span class="pl-popup-name">${escapeHtml(pl.name)}</span><span class="pl-popup-state">${assigned ? "✓" : ""}</span>`;
-    item.addEventListener("click", () => {
-      addTrackToPlaylist(trackId, pl.id);
-      renderSidebarPlaylists();
-      if (currentPage === "playlist") switchPage("playlist", currentPlaylistId);
-      closePopup(false);
-      onChange?.(pl.id);
-    });
+    item.disabled = assigned;
+    if (!assigned) {
+      item.addEventListener("click", () => {
+        addTrackToPlaylist(trackId, pl.id);
+        renderSidebarPlaylists();
+        if (currentPage === "playlist") switchPage("playlist", currentPlaylistId);
+        closePopup(false);
+        onChange?.(pl.id);
+      });
+    }
     listEl.appendChild(item);
   });
   const createBtn = popup.querySelector(".pl-popup-create")! as HTMLButtonElement;
@@ -3325,10 +3427,6 @@ function startAudio(track: Track) {
   beginPlaybackBuffering(token);
   crossfadeArmedFor = null;
   playbackGain = getPlayerSettings().crossfade ? 0 : 1;
-  window.setTimeout(() => {
-    if (token === playbackToken && activeAudioTrackId === track.id && player.playing) recordActiveTrackPlay();
-  }, 2000);
-
   void getTrackPlaybackUrl(track).then(async (sourceUrl) => {
     if (!sourceUrl || token !== playbackToken || activeAudioTrackId !== track.id || !player.playing) return;
     if (isHlsPlaybackUrl(sourceUrl)) {
@@ -3394,7 +3492,7 @@ function seekActiveTrack(seconds: number) {
 
   const applyNativeSeek = () => {
     if (activeAudioTrackId !== track.id) return false;
-    if (audioEl.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return false;
+    if (audioEl.readyState < HTMLMediaElement.HAVE_METADATA) return false;
     const nativeTarget = Math.max(0, target - currentStreamOffset);
     try {
       audioEl.currentTime = nativeTarget;
@@ -3450,9 +3548,7 @@ function previewActiveTrackPosition(pct: number) {
 
 audioEl.addEventListener("play", () => {
   player.playing = true;
-  startListeningClock();
   updatePlayIcon();
-  recordActiveTrackPlay();
 });
 
 audioEl.addEventListener("playing", recordActiveTrackPlay);
@@ -3466,15 +3562,20 @@ audioEl.addEventListener("playing", () => {
 });
 
 audioEl.addEventListener("waiting", () => {
+  pauseListeningClock();
   if (player.playing && activeAudioTrackId) beginPlaybackBuffering(playbackToken);
 });
 
 audioEl.addEventListener("stalled", () => {
+  pauseListeningClock();
   if (player.playing && activeAudioTrackId) beginPlaybackBuffering(playbackToken);
 });
 
+audioEl.addEventListener("seeking", pauseListeningClock);
+
 audioEl.addEventListener("seeked", () => {
   clearPlaybackBuffering();
+  if (player.playing && !audioEl.paused) startListeningClock();
   updatePlayIcon();
 });
 
@@ -3539,6 +3640,7 @@ audioEl.addEventListener("ended", () => {
 });
 
 audioEl.addEventListener("error", () => {
+  pauseListeningClock();
   clearPlaybackBuffering();
   if (!player.playing) return;
   player.playing = false;
@@ -3813,13 +3915,18 @@ function initScrollbar() {
   function sync() {
     const max = wrapper.scrollWidth - wrapper.clientWidth;
     const pct = max > 0 ? wrapper.scrollLeft / max : 0;
-    const tw = Math.max(10, (wrapper.clientWidth / wrapper.scrollWidth) * 100);
+    const tw = wrapper.scrollWidth > 0 ? Math.min(100, Math.max(10, (wrapper.clientWidth / wrapper.scrollWidth) * 100)) : 100;
     thumb.style.width = `${tw}%`;
     thumb.style.marginLeft = `${pct * (100 - tw)}%`;
   }
   wrapper.addEventListener("scroll", sync);
-  window.addEventListener("resize", sync);
+  const resizeObserver = new ResizeObserver(sync);
+  resizeObserver.observe(wrapper);
   setTimeout(sync, 50);
+  recentScrollbarCleanup = () => {
+    wrapper.removeEventListener("scroll", sync);
+    resizeObserver.disconnect();
+  };
 
   let dragging = false;
   track.addEventListener("mousedown", (e) => {
@@ -3889,6 +3996,16 @@ document.addEventListener("keydown", (e) => {
   if (e.code === "ArrowRight") { e.preventDefault(); playNext(); }
   if (e.code === "ArrowLeft") { e.preventDefault(); playPrev(); }
 });
+
+// A drag over a copyable title must not also activate the containing track row
+// when the pointer is released. A normal click still starts playback.
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  const selection = window.getSelection();
+  if (!target?.closest(".track-title-selectable") || !selection || selection.isCollapsed) return;
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
 
 let hoverPrepareTimer: number | null = null;
 document.addEventListener("pointerover", (event) => {

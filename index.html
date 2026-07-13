@@ -76,6 +76,22 @@
           <button type="button" data-sidebar-page="explore"><span aria-hidden="true">↗</span><span>Популярное</span></button>
           <button type="button" data-sidebar-page="radio"><span aria-hidden="true">◉</span><span>Радиоволна</span></button>
         </nav>
+        <section class="sidebar-playlists" aria-labelledby="sidebarPlaylistsTitle">
+          <div class="sidebar-playlists-head">
+            <span id="sidebarPlaylistsTitle">Мои плейлисты</span>
+            <button id="createPlaylistBtn" type="button" aria-label="Создать плейлист" aria-expanded="false" aria-controls="createPlaylistForm">+</button>
+          </div>
+          <form id="createPlaylistForm" class="hidden" autocomplete="off">
+            <label class="sr-only" for="newPlaylistName">Название плейлиста</label>
+            <input id="newPlaylistName" type="text" maxlength="40" placeholder="Название плейлиста" />
+            <p id="playlistFormError" class="hidden" role="alert"></p>
+            <div class="sidebar-playlist-form-actions">
+              <button type="submit">Создать</button>
+              <button id="cancelPlaylistBtn" type="button">Отмена</button>
+            </div>
+          </form>
+          <div id="sidebarPlaylistContainer" aria-live="polite"></div>
+        </section>
         <div class="mt-auto pt-6 text-sm text-white/30">
           <div id="likedTracks" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/5 cursor-pointer transition-all duration-300 ease-out hover:bg-white/10 active:scale-[0.97]" role="button" tabindex="0" aria-label="Любимые треки">
             <svg class="w-5 h-5 shrink-0 text-[#ff4d4d]" fill="currentColor" stroke="#ff4d4d" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.08C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
@@ -94,7 +110,7 @@
           <button id="nowPlayingFocus" class="player-meta-button min-w-0 flex-1" type="button" aria-label="Открыть полноэкранный плеер">
             <span id="nowPlayingArt" class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shrink-0 flex items-center justify-center text-sm border border-white/10 relative" aria-hidden="true">♪</span>
             <span class="min-w-0 block">
-              <span id="nowPlayingTitle" class="text-sm font-medium truncate block">Obsessed</span>
+              <span id="nowPlayingTitle" class="track-title-selectable text-sm font-medium truncate block">Obsessed</span>
               <span id="nowPlayingArtist" class="text-xs text-white/40 truncate block">Mariah Carey</span>
             </span>
           </button>
@@ -152,7 +168,7 @@
       <div class="focus-player-stage flex flex-col items-center justify-center gap-5 px-8">
         <div id="focusArt" class="w-72 h-72 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 shrink-0 border border-white/10 shadow-2xl" aria-hidden="true"></div>
         <div class="text-center max-w-md">
-          <p id="focusTitle" class="text-2xl font-bold tracking-tight">Obsessed</p>
+          <p id="focusTitle" class="track-title-selectable text-2xl font-bold tracking-tight">Obsessed</p>
           <p id="focusArtist" class="text-sm text-white/50 mt-1">Mariah Carey</p>
         </div>
         <div class="focus-transport" aria-label="Управление воспроизведением">

@@ -39,48 +39,64 @@ export function equalizerCurvePoints(gains: number[]): string {
 
 export class EqualizerEngine {
   private context: AudioContext | null = null;
-  private source: MediaElementAudioSourceNode | null = null;
   private filters: BiquadFilterNode[] = [];
   private preamp: GainNode | null = null;
-  private limiter: DynamicsCompressorNode | null = null;
+  private dry: GainNode | null = null;
+  private wet: GainNode | null = null;
 
   constructor(private readonly audio: HTMLAudioElement) {}
 
   apply(state: EqualizerState): void {
     const now = this.context?.currentTime || 0;
+    this.dry?.gain.setTargetAtTime(state.enabled ? 0 : 1, now, 0.015);
+    this.wet?.gain.setTargetAtTime(state.enabled ? 1 : 0, now, 0.015);
     if (this.preamp) this.preamp.gain.setTargetAtTime(Math.pow(10, (state.enabled ? state.preamp : 0) / 20), now, 0.025);
     this.filters.forEach((filter, index) => filter.gain.setTargetAtTime(state.enabled ? Number(state.gains[index] || 0) : 0, now, 0.015));
   }
 
   async ensure(state: EqualizerState): Promise<boolean> {
+    let pendingContext: AudioContext | null = null;
     try {
       if (!this.context) {
-        this.context = new AudioContext();
-        this.source = this.context.createMediaElementSource(this.audio);
-        this.preamp = this.context.createGain();
-        this.limiter = this.context.createDynamicsCompressor();
-        this.limiter.threshold.value = -1.5;
-        this.limiter.knee.value = 4;
-        this.limiter.ratio.value = 12;
-        this.limiter.attack.value = 0.003;
-        this.limiter.release.value = 0.24;
-        this.filters = EQ_FREQUENCIES.map((frequency, index) => {
-          const filter = this.context!.createBiquadFilter();
+        pendingContext = new AudioContext();
+        const source = pendingContext.createMediaElementSource(this.audio);
+        const dry = pendingContext.createGain();
+        const wet = pendingContext.createGain();
+        const preamp = pendingContext.createGain();
+        const limiter = pendingContext.createDynamicsCompressor();
+        limiter.threshold.value = -1.5;
+        limiter.knee.value = 4;
+        limiter.ratio.value = 12;
+        limiter.attack.value = 0.003;
+        limiter.release.value = 0.24;
+        const filters = EQ_FREQUENCIES.map((frequency, index) => {
+          const filter = pendingContext!.createBiquadFilter();
           filter.type = index === 0 ? "lowshelf" : index === EQ_FREQUENCIES.length - 1 ? "highshelf" : "peaking";
           filter.frequency.value = frequency;
           filter.Q.value = index === 0 || index === EQ_FREQUENCIES.length - 1 ? 0.72 : 1.15;
           return filter;
         });
-        this.source.connect(this.preamp);
-        let previous: AudioNode = this.preamp;
-        this.filters.forEach((filter) => { previous.connect(filter); previous = filter; });
-        previous.connect(this.limiter);
-        this.limiter.connect(this.context.destination);
+        source.connect(dry);
+        dry.connect(pendingContext.destination);
+        source.connect(preamp);
+        let previous: AudioNode = preamp;
+        filters.forEach((filter) => { previous.connect(filter); previous = filter; });
+        previous.connect(limiter);
+        limiter.connect(wet);
+        wet.connect(pendingContext.destination);
+
+        this.context = pendingContext;
+        this.dry = dry;
+        this.wet = wet;
+        this.preamp = preamp;
+        this.filters = filters;
+        pendingContext = null;
       }
       if (this.context.state === "suspended") await this.context.resume();
       this.apply(state);
       return true;
     } catch {
+      if (pendingContext) void pendingContext.close().catch(() => undefined);
       return false;
     }
   }

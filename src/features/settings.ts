@@ -30,8 +30,17 @@ export const ACCENT_COLORS: Record<string, string> = {
 };
 
 export function settingSwitch(id: string, checked: boolean): string {
+  const labels: Record<string, string> = {
+    themeToggle: "Тёмная тема",
+    compactToggle: "Компактный режим",
+    reduceMotionToggle: "Меньше анимаций",
+    autoplayToggle: "Автовоспроизведение",
+    prefetchToggle: "Быстрая загрузка следующего трека",
+    normalizeToggle: "Компенсация тихой громкости",
+    crossfadeToggle: "Плавный переход",
+  };
   return `<label class="relative inline-flex items-center cursor-pointer">
-    <input id="${id}" type="checkbox" ${checked ? "checked" : ""} class="sr-only peer">
+    <input id="${id}" type="checkbox" ${checked ? "checked" : ""} class="sr-only peer" aria-label="${labels[id] || "Настройка"}">
     <span class="w-9 h-5 bg-white/10 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:duration-300 peer-checked:after:translate-x-4"></span>
   </label>`;
 }

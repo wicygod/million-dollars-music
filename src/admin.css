@@ -403,7 +403,6 @@ h2 { font-size: 16px; }
   padding-top: 14px;
 }
 
-.cache-actions select,
 .cache-actions button {
   border: 1px solid rgba(255,255,255,.09);
   border-radius: 8px;
@@ -411,6 +410,73 @@ h2 { font-size: 16px; }
   background: rgba(255,255,255,.05);
   padding: 9px 10px;
   outline: none;
+}
+
+.admin-select {
+  position: relative;
+  min-width: 0;
+}
+
+.admin-select-trigger {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(255,255,255,.1) !important;
+  border-radius: 8px;
+  padding: 9px 11px !important;
+  color: rgba(245,247,251,.86) !important;
+  background: #171b26 !important;
+  text-align: left;
+}
+
+.admin-select-trigger:hover,
+.admin-select.is-open .admin-select-trigger {
+  border-color: rgba(124,140,255,.52) !important;
+  background: #1c2130 !important;
+}
+
+.admin-select-chevron {
+  color: rgba(245,247,251,.5);
+  font-size: 16px;
+  transition: transform 160ms ease;
+}
+
+.admin-select.is-open .admin-select-chevron { transform: rotate(180deg); }
+
+.admin-select-menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  display: none;
+  overflow: hidden;
+  border: 1px solid rgba(124,140,255,.3);
+  border-radius: 9px;
+  padding: 5px;
+  background: #111520;
+  box-shadow: 0 18px 45px rgba(0,0,0,.5);
+}
+
+.admin-select.is-open .admin-select-menu { display: grid; }
+
+.admin-select-menu button {
+  width: 100%;
+  border: 0 !important;
+  border-radius: 6px;
+  padding: 9px 10px !important;
+  color: rgba(245,247,251,.72) !important;
+  background: transparent !important;
+  text-align: left;
+}
+
+.admin-select-menu button:hover,
+.admin-select-menu button.is-selected {
+  color: #fff !important;
+  background: rgba(124,140,255,.16) !important;
 }
 
 .cache-actions button { color: #ffb0b0; background: rgba(255,77,77,.1); }
@@ -641,7 +707,6 @@ h2 { font-size: 16px; }
   color: #fff;
 }
 
-.status-select,
 .detail-form input {
   width: 100%;
   border: 1px solid rgba(255,255,255,0.08);
@@ -651,6 +716,8 @@ h2 { font-size: 16px; }
   padding: 9px 10px;
   outline: none;
 }
+
+.status-select { width: 100%; }
 
 .user-detail {
   margin-top: 14px;

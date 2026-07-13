@@ -2,7 +2,6 @@ import type { MetadataFeed, MetadataProviderState, Track } from "../metadataFeed
 
 export const API_BASE_URL = import.meta.env.VITE_MUSIC_API_BASE_URL?.trim() || "http://5.181.21.13:8000";
 export const APP_AUTH_TOKEN = import.meta.env.VITE_MUSIC_APP_TOKEN?.trim() || "";
-export const ADMIN_API_KEY = import.meta.env.VITE_MUSIC_ADMIN_API_KEY?.trim() || "";
 const DEVICE_ID_STORAGE_KEY = "mm_device_id";
 const AUTH_TOKEN_STORAGE_KEY = "mm_auth_token";
 const AUTH_USER_STORAGE_KEY = "mm_auth_user";
@@ -79,6 +78,12 @@ export interface HistorySummary {
   total_tracks: number;
 }
 
+export interface BackendFavorite {
+  user_id: string;
+  track: BackendTrack;
+  created_at: string;
+}
+
 function fallbackUuid(): string {
   return `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
@@ -107,8 +112,6 @@ function apiHeaders(): HeadersInit {
 export function withAppToken(url: string): string {
   const parsed = new URL(url, window.location.href);
   parsed.searchParams.set("app_token", APP_AUTH_TOKEN);
-  const authToken = getAuthToken();
-  if (authToken) parsed.searchParams.set("auth_token", authToken);
   return parsed.toString();
 }
 
@@ -125,7 +128,7 @@ export function adminHeaders(): HeadersInit {
 }
 
 export function getAdminApiKey(): string {
-  return ADMIN_API_KEY || sessionStorage.getItem(ADMIN_SESSION_KEY)?.trim() || "";
+  return sessionStorage.getItem(ADMIN_SESSION_KEY)?.trim() || "";
 }
 
 export function setAdminSessionKey(value: string): void {
@@ -284,6 +287,21 @@ export function getHistorySummary(): Promise<HistorySummary> {
   return apiFetch<HistorySummary>("/api/history/summary");
 }
 
+export function getUserFavorites(): Promise<BackendFavorite[]> {
+  return apiFetch<BackendFavorite[]>("/api/user/favorites");
+}
+
+export async function setUserFavorite(trackId: string | number, liked: boolean): Promise<void> {
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/user/favorites/${encodeURIComponent(String(trackId))}`,
+    { method: liked ? "POST" : "DELETE", headers: apiHeaders() },
+  );
+  if (!response.ok) {
+    handleUnauthorizedResponse(response.status);
+    throw new Error(`Favorite update failed: ${response.status}`);
+  }
+}
+
 export async function addListeningTime(seconds: number): Promise<HistorySummary> {
   const response = await fetchWithTimeout(`${API_BASE_URL}/api/history/progress`, {
     method: "POST",
@@ -406,7 +424,7 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
   const region = track.region || undefined;
   const tags = [...new Set([...(track.tags || []), genre, region].filter(Boolean).map(String))];
   const audioSrc = resolveBackendUrl(track.audio_src);
-  const isPlayable = true;
+  const isPlayable = Boolean(track.is_playable && (track.audio_src || track.source_url));
 
   return {
     id: String(track.id),
@@ -420,7 +438,7 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
     tags,
     isPlayable,
     audioSrc,
-    sourceUrl: `${API_BASE_URL}/api/stream/track/${encodeURIComponent(String(track.id))}`,
+    sourceUrl: isPlayable ? `${API_BASE_URL}/api/stream/track/${encodeURIComponent(String(track.id))}` : undefined,
     sourceType: "metadata",
     providerState,
     gradient: gradientForGenre(genre),

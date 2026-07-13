@@ -147,7 +147,7 @@ const cacheBuilding = document.getElementById("cacheBuilding")!;
 const cacheDiskFree = document.getElementById("cacheDiskFree")!;
 const cacheOldest = document.getElementById("cacheOldest")!;
 const cacheStale = document.getElementById("cacheStale")!;
-const cacheMaxAge = document.getElementById("cacheMaxAge") as HTMLSelectElement;
+const cacheMaxAge = document.getElementById("cacheMaxAge")!;
 const pruneCacheButton = document.getElementById("pruneCache") as HTMLButtonElement;
 const activityTotal = document.getElementById("activityTotal")!;
 const activityStreams = document.getElementById("activityStreams")!;
@@ -171,6 +171,84 @@ document.querySelectorAll<HTMLButtonElement>(".nav-item").forEach((button) => {
   });
 });
 
+type AdminSelectHandler = (value: string) => void | Promise<void>;
+
+function closeAdminSelects(except?: HTMLElement): void {
+  document.querySelectorAll<HTMLElement>(".admin-select.is-open").forEach((select) => {
+    if (select === except) return;
+    select.classList.remove("is-open");
+    select.querySelector<HTMLButtonElement>(".admin-select-trigger")?.setAttribute("aria-expanded", "false");
+  });
+}
+
+function bindAdminSelect(select: HTMLElement, onSelect?: AdminSelectHandler): void {
+  if (select.dataset.bound === "true") return;
+  select.dataset.bound = "true";
+  const trigger = select.querySelector<HTMLButtonElement>(".admin-select-trigger");
+  const label = trigger?.querySelector<HTMLElement>("span:first-child");
+  if (!trigger || !label) return;
+
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = !select.classList.contains("is-open");
+    closeAdminSelects(select);
+    select.classList.toggle("is-open", willOpen);
+    trigger.setAttribute("aria-expanded", String(willOpen));
+    if (willOpen) select.querySelector<HTMLButtonElement>(".admin-select-menu .is-selected, .admin-select-menu [data-value]")?.focus();
+  });
+
+  const options = [...select.querySelectorAll<HTMLButtonElement>(".admin-select-menu [data-value]")];
+  options.forEach((option) => {
+    option.setAttribute("aria-selected", String(option.classList.contains("is-selected")));
+    option.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const value = option.dataset.value || "";
+      select.dataset.value = value;
+      label.textContent = option.textContent?.trim() || value;
+      options.forEach((item) => {
+        item.classList.remove("is-selected");
+        item.setAttribute("aria-selected", "false");
+      });
+      option.classList.add("is-selected");
+      option.setAttribute("aria-selected", "true");
+      select.classList.remove("is-open");
+      trigger.setAttribute("aria-expanded", "false");
+      if (onSelect) void onSelect(value);
+    });
+    option.addEventListener("keydown", (event) => {
+      const index = options.indexOf(option);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        select.classList.remove("is-open");
+        trigger.setAttribute("aria-expanded", "false");
+        trigger.focus();
+        return;
+      }
+      const nextIndex = event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1)
+        : event.key === "ArrowUp" ? Math.max(0, index - 1)
+          : event.key === "Home" ? 0
+            : event.key === "End" ? options.length - 1
+              : -1;
+      if (nextIndex >= 0) {
+        event.preventDefault();
+        options[nextIndex]?.focus();
+      }
+    });
+  });
+  trigger.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    closeAdminSelects(select);
+    select.classList.add("is-open");
+    trigger.setAttribute("aria-expanded", "true");
+    const target = event.key === "ArrowUp" ? options[options.length - 1] : options.find((option) => option.classList.contains("is-selected")) || options[0];
+    target?.focus();
+  });
+}
+
+document.addEventListener("click", () => closeAdminSelects());
+bindAdminSelect(cacheMaxAge);
+
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0 MB";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -180,22 +258,22 @@ function formatBytes(value: number): string {
 }
 
 function formatCount(value: number): string {
-  return new Intl.NumberFormat("en", { notation: value >= 10_000 ? "compact" : "standard" }).format(value || 0);
+  return new Intl.NumberFormat("ru-RU", { notation: value >= 10_000 ? "compact" : "standard" }).format(value || 0);
 }
 
 function formatDate(value: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString("ru-RU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function formatUptime(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds || 0));
   const hours = Math.floor(safe / 3600);
   const minutes = Math.floor((safe % 3600) / 60);
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${minutes}m`;
+  if (hours > 0) return `${hours} ч ${minutes} мин`;
+  return `${minutes} мин`;
 }
 
 function escapeHtml(value: string): string {
@@ -206,25 +284,62 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function localizeLogMessage(message: string): string {
+  const exact: Record<string, string> = {
+    "Stream endpoint hit": "Вызван endpoint воспроизведения",
+  };
+  if (exact[message]) return exact[message];
+  const rules: Array<[RegExp, string]> = [
+    [/^Search request: /, "Поисковый запрос: "],
+    [/^Track stream started: /, "Запущено воспроизведение трека: "],
+    [/^Rate limit blocked /, "Лимит запросов заблокировал: "],
+    [/^Admin pruned /, "Администратор очистил: "],
+    [/^Admin banned /, "Администратор заблокировал "],
+    [/^Admin unbanned /, "Администратор разблокировал "],
+    [/^Admin updated /, "Администратор обновил "],
+    [/^Admin generated temporary password for /, "Администратор создал временный пароль для "],
+    [/^Admin cleared data for /, "Администратор очистил данные "],
+  ];
+  for (const [pattern, replacement] of rules) {
+    if (pattern.test(message)) return message.replace(pattern, replacement);
+  }
+  return message;
+}
+
 async function adminFetch<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, { headers: adminHeaders() });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers: adminHeaders(), signal: controller.signal })
+    .finally(() => window.clearTimeout(timeout));
+  if (response.status === 401 || response.status === 403) showAdminAccessGate();
   if (!response.ok) throw new Error(`Admin API failed: ${response.status}`);
   return response.json() as Promise<T>;
 }
 
 async function adminSend<T>(path: string, method: "POST" | "PATCH", body: unknown = {}): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method,
     headers: { ...adminHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+    signal: controller.signal,
+  }).finally(() => window.clearTimeout(timeout));
+  if (response.status === 401 || response.status === 403) showAdminAccessGate();
   if (!response.ok) throw new Error(`Admin API failed: ${response.status}`);
   return response.json() as Promise<T>;
 }
 
+function showAdminAccessGate(): void {
+  setAdminSessionKey("");
+  adminAccessGate.hidden = false;
+  adminAccessError.textContent = "Сессия администратора завершена. Введите ключ снова.";
+  window.setTimeout(() => adminAccessKey.focus(), 40);
+}
+
 function setBackendStatus(ok: boolean): void {
   statusDot.classList.toggle("ok", ok);
-  backendStatus.textContent = ok ? "Online" : "Offline";
+  backendStatus.textContent = ok ? "Онлайн" : "Нет связи";
 }
 
 function renderSparkline(): void {
@@ -259,7 +374,7 @@ function renderStats(stats: AdminStats): void {
   while (cpuHistory.length > 32) cpuHistory.shift();
   renderSparkline();
   renderTopTracks(stats.top_tracks || []);
-  lastSync.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  lastSync.textContent = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function renderActivityFeed(target: HTMLElement, events: LogEvent[], emptyMessage: string): void {
@@ -267,7 +382,7 @@ function renderActivityFeed(target: HTMLElement, events: LogEvent[], emptyMessag
     <div class="activity-row ${escapeHtml(event.kind)}">
       <span class="activity-dot"></span>
       <div>
-        <strong>${escapeHtml(event.message)}</strong>
+        <strong>${escapeHtml(localizeLogMessage(event.message))}</strong>
         <p>${escapeHtml(event.ts)} · ${escapeHtml(event.ip || "unknown")}</p>
       </div>
     </div>
@@ -282,9 +397,9 @@ function renderOverview(payload: AdminOverview): void {
   catalogArtists.textContent = formatCount(catalog.artists);
   catalogReview.textContent = formatCount(catalog.needs_review);
   catalogCovers.textContent = formatCount(catalog.missing_covers);
-  catalogHours.textContent = `${Math.round((catalog.duration_seconds || 0) / 3600)}h`;
+  catalogHours.textContent = `${Math.round((catalog.duration_seconds || 0) / 3600)} ч`;
   const healthOk = catalog.tracks > 0 && playablePercent >= 90 && catalog.needs_review <= Math.max(5, catalog.tracks * 0.05);
-  catalogHealth.textContent = healthOk ? "Healthy" : catalog.tracks > 0 ? "Attention" : "Empty";
+  catalogHealth.textContent = healthOk ? "В норме" : catalog.tracks > 0 ? "Требует внимания" : "Пусто";
   catalogHealth.classList.toggle("ok", healthOk);
 
   const largestSource = Math.max(1, ...catalog.sources.map((source) => source.tracks));
@@ -294,13 +409,13 @@ function renderOverview(payload: AdminOverview): void {
       <div><i style="width:${Math.max(4, (source.tracks / largestSource) * 100).toFixed(1)}%"></i></div>
       <strong>${formatCount(source.tracks)}</strong>
     </div>
-  `).join("") : `<span class="muted">No source data</span>`;
+  `).join("") : `<span class="muted">Нет данных об источниках</span>`;
 
   communityMetrics.innerHTML = [
-    ["Total users", community.users],
-    ["New / 7d", community.new_users_7d],
-    ["Subscribed", community.subscribed_users],
-    ["Favorites", community.favorites],
+    ["Всего пользователей", community.users],
+    ["Новых за 7 дней", community.new_users_7d],
+    ["С подпиской", community.subscribed_users],
+    ["В избранном", community.favorites],
   ].map(([label, value]) => `<span><strong>${formatCount(Number(value))}</strong>${label}</span>`).join("");
 
   const cacheUsage = Math.max(0, Math.min(100, cache.usage_percent || 0));
@@ -312,40 +427,40 @@ function renderOverview(payload: AdminOverview): void {
   cacheDiskFree.textContent = formatBytes(cache.disk_free_bytes);
   cacheOldest.textContent = formatDate(cache.oldest_at);
   cacheStale.textContent = formatCount(cache.stale_files_24h);
-  cacheState.textContent = cache.building > 0 ? "Building" : cacheUsage >= 90 ? "Near limit" : "Ready";
+  cacheState.textContent = cache.building > 0 ? "Создаётся" : cacheUsage >= 90 ? "Почти заполнен" : "Готов";
   cacheState.classList.toggle("ok", cache.building === 0 && cacheUsage < 90);
 
-  activityTotal.textContent = `${formatCount(activity.total)} events`;
+  activityTotal.textContent = `${formatCount(activity.total)} событий`;
   activityStreams.textContent = formatCount(activity.streams);
   activitySearches.textContent = formatCount(activity.searches);
   activityAdmin.textContent = formatCount(activity.admin_actions);
   activityAlerts.textContent = formatCount(activity.alerts);
-  renderActivityFeed(recentStreams, activity.recent_streams || [], "No stream starts in this window.");
-  renderActivityFeed(recentAlerts, activity.recent_alerts || [], "No alerts in this window.");
+  renderActivityFeed(recentStreams, activity.recent_streams || [], "За этот период запусков треков не было.");
+  renderActivityFeed(recentAlerts, activity.recent_alerts || [], "За этот период предупреждений не было.");
 }
 
 function renderTopTracks(items: TopTrack[]): void {
   const rows = items.slice(0, 10).map((item) => {
-    const artist = item.track.artists?.map((entry) => entry.name).filter(Boolean).join(", ") || "Unknown Artist";
+    const artist = item.track.artists?.map((entry) => entry.name).filter(Boolean).join(", ") || "Неизвестный артист";
     return `
       <button class="track-row" type="button" data-track="${item.track.id}">
         <div>
-          <div class="track-title">${escapeHtml(item.track.title || "Untitled")}</div>
+          <div class="track-title">${escapeHtml(item.track.title || "Без названия")}</div>
           <div class="track-artist">${escapeHtml(artist)}</div>
         </div>
         <div class="play-count">${item.play_count}</div>
       </button>
     `;
   });
-  topTracks.innerHTML = rows.length ? rows.join("") : `<p class="muted">No plays yet.</p>`;
+  topTracks.innerHTML = rows.length ? rows.join("") : `<p class="muted">Прослушиваний пока нет.</p>`;
 }
 
 function renderLogs(events: LogEvent[]): void {
-  logCount.textContent = `${events.length} events`;
+  logCount.textContent = `${events.length} событий`;
   logsList.innerHTML = events.slice().reverse().map((event) => `
     <div class="log-row ${escapeHtml(event.kind)}">
       <div class="log-meta">${escapeHtml(event.ts)} | ${escapeHtml(event.ip)} | ${escapeHtml(event.path)}</div>
-      <div>${escapeHtml(event.message)}</div>
+      <div>${escapeHtml(localizeLogMessage(event.message))}</div>
     </div>
   `).join("");
 }
@@ -353,14 +468,24 @@ function renderLogs(events: LogEvent[]): void {
 function userSubtitle(user: AdminUser): string {
   const metrics = user.metrics;
   if (!metrics) return `@${user.login}`;
-  return `@${user.login} | ${metrics.history_count} plays | ${metrics.playlists_count} playlists`;
+  return `@${user.login} | ${metrics.history_count} прослушиваний | ${metrics.playlists_count} плейлистов`;
+}
+
+function subscriptionLabel(status: string): string {
+  const labels: Record<string, string> = {
+    inactive: "Без подписки",
+    premium: "Премиум",
+    trial: "Пробный период",
+    support: "Поддержка",
+  };
+  return labels[status] || status;
 }
 
 function renderUsers(users: AdminUser[]): void {
   currentUsers = users;
   if (!users.length) {
-    usersTable.innerHTML = `<p class="muted">No registered users yet. New users will appear here after registration.</p>`;
-    userDetail.textContent = "Helpdesk is ready. There are no accounts after the last account cleanup.";
+    usersTable.innerHTML = `<p class="muted">Зарегистрированных пользователей пока нет. Новые аккаунты появятся здесь после регистрации.</p>`;
+    userDetail.textContent = "Пользователей пока нет.";
     return;
   }
   usersTable.innerHTML = users.map((user) => `
@@ -369,15 +494,20 @@ function renderUsers(users: AdminUser[]): void {
         <div class="user-name">${escapeHtml(user.nickname || user.login)}</div>
         <div class="user-meta">ID ${user.id} | ${escapeHtml(userSubtitle(user))}</div>
       </div>
-      <select class="status-select" data-action="subscription" data-user="${user.id}">
+      <div class="admin-select status-select" data-user="${user.id}" data-value="${escapeHtml(user.subscription_status)}">
+        <button class="admin-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+          <span>${escapeHtml(subscriptionLabel(user.subscription_status))}</span><span class="admin-select-chevron">⌄</span>
+        </button>
+        <div class="admin-select-menu" role="listbox">
         ${["inactive", "premium", "trial", "support"].map((status) => `
-          <option value="${status}" ${status === user.subscription_status ? "selected" : ""}>${status}</option>
+          <button type="button" role="option" data-value="${status}" class="${status === user.subscription_status ? "is-selected" : ""}">${subscriptionLabel(status)}</button>
         `).join("")}
-      </select>
+        </div>
+      </div>
       <div class="user-actions">
-        <button type="button" data-action="inspect" data-user="${user.id}">Inspect</button>
-        <button type="button" data-action="password" data-user="${user.id}">Temp pass</button>
-        <button type="button" data-action="${user.is_banned ? "unban" : "ban"}" data-user="${user.id}" class="${user.is_banned ? "" : "danger"}">${user.is_banned ? "Unban" : "Ban"}</button>
+        <button type="button" data-action="inspect" data-user="${user.id}">Открыть</button>
+        <button type="button" data-action="password" data-user="${user.id}">Временный пароль</button>
+        <button type="button" data-action="${user.is_banned ? "unban" : "ban"}" data-user="${user.id}" class="${user.is_banned ? "" : "danger"}">${user.is_banned ? "Разблокировать" : "Заблокировать"}</button>
       </div>
     </div>
   `).join("");
@@ -391,23 +521,23 @@ function renderUserDetail(payload: UserDetail): void {
     <div class="detail-head">
       <div>
         <h3>${escapeHtml(user.nickname || user.login)}</h3>
-        <p>@${escapeHtml(user.login)} | ${escapeHtml(user.subscription_status || "inactive")}${user.is_banned ? " | banned" : ""}</p>
+        <p>@${escapeHtml(user.login)} | ${escapeHtml(subscriptionLabel(user.subscription_status || "inactive"))}${user.is_banned ? " | заблокирован" : ""}</p>
       </div>
-      <button type="button" class="danger" data-action="clear" data-user="${user.id}">Clear user data</button>
+      <button type="button" class="danger" data-action="clear" data-user="${user.id}">Очистить данные</button>
     </div>
     <div class="detail-metrics">
-      <span>${metrics?.history_count ?? 0} plays</span>
-      <span>${metrics?.favorites_count ?? 0} liked</span>
-      <span>${metrics?.playlists_count ?? 0} playlists</span>
+      <span>${metrics?.history_count ?? 0} прослушиваний</span>
+      <span>${metrics?.favorites_count ?? 0} в избранном</span>
+      <span>${metrics?.playlists_count ?? 0} плейлистов</span>
     </div>
     <form class="detail-form" data-user="${user.id}">
-      <label>Nickname<input name="nickname" value="${escapeHtml(user.nickname || "")}" maxlength="96" /></label>
-      <label>Avatar URL<input name="avatar_url" value="${escapeHtml(user.avatar_url || "")}" /></label>
-      <button type="submit">Save profile</button>
+      <label>Отображаемое имя<input name="nickname" value="${escapeHtml(user.nickname || "")}" maxlength="96" /></label>
+      <label>Ссылка на аватар<input name="avatar_url" value="${escapeHtml(user.avatar_url || "")}" /></label>
+      <button type="submit">Сохранить профиль</button>
     </form>
     <div class="detail-history">
-      <strong>Recent listens</strong>
-      ${history.length ? history.map((item) => `<p>${escapeHtml(item.track.title)} <span>${escapeHtml(item.played_at)}</span></p>`).join("") : `<p class="muted">No listening history.</p>`}
+      <strong>Последние прослушивания</strong>
+      ${history.length ? history.map((item) => `<p>${escapeHtml(item.track.title)} <span>${escapeHtml(item.played_at)}</span></p>`).join("") : `<p class="muted">История прослушиваний пуста.</p>`}
     </div>
   `;
 
@@ -422,24 +552,25 @@ function renderUserDetail(payload: UserDetail): void {
         nickname: String(data.get("nickname") || ""),
         avatar_url: String(data.get("avatar_url") || ""),
       });
-      showToast("Profile saved");
+      showToast("Профиль сохранён");
       await refreshUsers();
       await inspectUser(userId);
     } catch {
-      showToast("Could not save profile");
+      showToast("Не удалось сохранить профиль");
     }
   });
 
   userDetail.querySelector<HTMLButtonElement>('[data-action="clear"]')?.addEventListener("click", async (event) => {
     const userId = Number((event.currentTarget as HTMLButtonElement).dataset.user || 0);
     if (!userId) return;
+    if (!window.confirm("Очистить историю, избранное и плейлисты пользователя? Это действие нельзя отменить.")) return;
     try {
       await adminSend(`/api/admin/users/${userId}/clear-data`, "POST");
-      showToast("User data cleared");
+      showToast("Данные пользователя очищены");
       await refreshUsers();
       await inspectUser(userId);
     } catch {
-      showToast("Could not clear user data");
+      showToast("Не удалось очистить данные");
     }
   });
 }
@@ -448,7 +579,7 @@ async function inspectUser(userId: number): Promise<void> {
   try {
     renderUserDetail(await adminFetch<UserDetail>(`/api/admin/users/${userId}`));
   } catch {
-    userDetail.textContent = "Could not load user details.";
+    userDetail.textContent = "Не удалось загрузить данные пользователя.";
   }
 }
 
@@ -464,27 +595,28 @@ function bindUserActions(): void {
         if (action === "password") {
           const payload = await adminSend<{ temporary_password: string }>(`/api/admin/users/${userId}/reset-password`, "POST");
           await navigator.clipboard?.writeText(payload.temporary_password).catch(() => undefined);
-          showToast(`Temporary password: ${payload.temporary_password}`);
+          showToast(`Временный пароль: ${payload.temporary_password}`);
         }
         if (action === "ban") {
+          if (!window.confirm("Заблокировать этого пользователя?")) return;
           await adminSend(`/api/admin/users/${userId}/ban`, "POST", { reason: "manual admin ban" });
-          showToast("User banned");
+          showToast("Пользователь заблокирован");
         }
         if (action === "unban") {
           await adminSend(`/api/admin/users/${userId}/unban`, "POST");
-          showToast("User unbanned");
+          showToast("Пользователь разблокирован");
         }
         if (action !== "inspect") await refreshUsers();
       } catch {
-        showToast("Admin action failed");
+        showToast("Не удалось выполнить действие");
       } finally {
         button.disabled = false;
       }
     });
   });
 
-  usersTable.querySelectorAll<HTMLSelectElement>(".status-select").forEach((select) => {
-    select.addEventListener("change", async () => {
+  usersTable.querySelectorAll<HTMLElement>(".status-select").forEach((select) => {
+    bindAdminSelect(select, async (value) => {
       const userId = Number(select.dataset.user || 0);
       const user = currentUsers.find((item) => item.id === userId);
       if (!userId || !user) return;
@@ -492,18 +624,18 @@ function bindUserActions(): void {
         await adminSend(`/api/admin/users/${userId}`, "PATCH", {
           nickname: user.nickname,
           avatar_url: user.avatar_url || "",
-          subscription_status: select.value,
+          subscription_status: value,
         });
-        showToast("Subscription updated");
+        showToast("Статус подписки обновлён");
         await refreshUsers();
       } catch {
-        showToast("Could not update subscription");
+        showToast("Не удалось обновить статус подписки");
       }
     });
   });
 }
 
-function showToast(message = "Done"): void {
+function showToast(message = "Готово"): void {
   toast.textContent = message;
   toast.classList.add("show");
   window.setTimeout(() => toast.classList.remove("show"), 2600);
@@ -532,7 +664,7 @@ async function refreshUsers(): Promise<void> {
     renderUsers(payload.users || []);
     bindUserActions();
   } catch {
-    usersTable.innerHTML = `<p class="muted">Could not load users.</p>`;
+    usersTable.innerHTML = `<p class="muted">Не удалось загрузить пользователей.</p>`;
     setBackendStatus(false);
   }
 }
@@ -558,8 +690,8 @@ async function refreshEverything(): Promise<void> {
 
 refreshAllButton.addEventListener("click", () => void refreshEverything());
 pruneCacheButton.addEventListener("click", async () => {
-  const maxAgeHours = Number(cacheMaxAge.value || 24);
-  if (!window.confirm(`Remove completed audio files unused for more than ${maxAgeHours} hours?`)) return;
+  const maxAgeHours = Number(cacheMaxAge.dataset.value || 24);
+  if (!window.confirm(`Удалить готовые аудиофайлы, которые не использовались более ${maxAgeHours} ч?`)) return;
   pruneCacheButton.disabled = true;
   try {
     const payload = await adminSend<{ removed_files: number; freed_bytes: number; audio_cache: AudioCacheMetrics }>(
@@ -567,32 +699,43 @@ pruneCacheButton.addEventListener("click", async () => {
       "POST",
       { max_age_hours: maxAgeHours },
     );
-    showToast(`Removed ${payload.removed_files} files · freed ${formatBytes(payload.freed_bytes)}`);
+    showToast(`Удалено файлов: ${payload.removed_files} · освобождено: ${formatBytes(payload.freed_bytes)}`);
     await refreshOverview();
   } catch {
-    showToast("Could not prune audio cache");
+    showToast("Не удалось очистить аудиокеш");
   } finally {
     pruneCacheButton.disabled = false;
   }
 });
 
 let adminPollingStarted = false;
+let adminPollInFlight = false;
+let adminPollTick = 0;
 
 function startAdminPolling(): void {
   if (adminPollingStarted) return;
   adminPollingStarted = true;
   void refreshEverything();
-  window.setInterval(() => void refreshStats(), 2000);
-  window.setInterval(() => void refreshLogs(), 1500);
-  window.setInterval(() => void refreshUsers(), 7000);
-  window.setInterval(() => void refreshOverview(), 8000);
+  window.setInterval(async () => {
+    if (document.hidden || adminAccessGate.hidden === false || adminPollInFlight) return;
+    adminPollInFlight = true;
+    adminPollTick++;
+    try {
+      await Promise.all([refreshStats(), refreshLogs()]);
+      if (adminPollTick % 3 === 0 && !document.querySelector(".admin-select.is-open")) {
+        await Promise.all([refreshUsers(), refreshOverview()]);
+      }
+    } finally {
+      adminPollInFlight = false;
+    }
+  }, 5_000);
 }
 
 adminAccessForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const key = adminAccessKey.value.trim();
   if (!key) return;
-  adminAccessError.textContent = "Checking access…";
+  adminAccessError.textContent = "Проверяем доступ…";
   setAdminSessionKey(key);
   try {
     const overview = await adminFetch<AdminOverview>("/api/admin/overview");
@@ -603,7 +746,7 @@ adminAccessForm.addEventListener("submit", async (event) => {
     startAdminPolling();
   } catch {
     setAdminSessionKey("");
-    adminAccessError.textContent = "Access denied. Check the admin key.";
+    adminAccessError.textContent = "Доступ запрещён. Проверьте ключ администратора.";
     adminAccessKey.select();
   }
 });

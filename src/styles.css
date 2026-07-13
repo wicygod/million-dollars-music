@@ -13,6 +13,25 @@ body {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
+/* The desktop shell behaves like a native player: interface chrome is not
+   accidentally highlightable, while track titles remain copyable. Form
+   controls keep native text selection so editing and keyboard shortcuts work. */
+body#appRoot,
+body#appRoot * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+body#appRoot :is(input, textarea, [contenteditable="true"]),
+body#appRoot .track-title-selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+body#appRoot .track-title-selectable {
+  cursor: text;
+}
+
 :root {
   --app-bg: #08090b;
   --app-bg-soft: #0b0d10;
@@ -1017,6 +1036,98 @@ input[type="range"]::-moz-range-thumb {
 
 #likedTracks {
   color: var(--text-muted) !important;
+}
+
+.sidebar-playlists {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  min-height: 0;
+}
+
+.sidebar-playlists-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  color: var(--text-subtle);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.sidebar-playlists-head #createPlaylistBtn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
+#sidebarPlaylistContainer {
+  display: grid;
+  gap: 2px;
+  max-height: min(28vh, 250px);
+  overflow-y: auto;
+}
+
+#createPlaylistForm {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+}
+
+#createPlaylistForm.hidden {
+  display: none !important;
+}
+
+#createPlaylistForm input {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: rgba(255,255,255,.045);
+  color: var(--text-main);
+  padding: 8px 9px;
+  outline: none;
+}
+
+#createPlaylistForm input:focus {
+  border-color: var(--accent-line);
+}
+
+#playlistFormError {
+  color: #ff9b9b;
+  font-size: 10px;
+}
+
+.sidebar-playlist-form-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.sidebar-playlist-form-actions button {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  padding: 7px;
+  color: var(--text-muted);
+  background: rgba(255,255,255,.04);
+  font-size: 10px;
+}
+
+.sidebar-playlist-form-actions button[type="submit"] {
+  color: #08090b;
+  background: #f2f4fb;
+}
+
+.pl-popup-item:disabled {
+  cursor: default;
+  opacity: .62;
 }
 
 .player-bar button {
@@ -2682,6 +2793,46 @@ header .hdr-btn[aria-current="page"] {
   border-radius: 12px;
   background: transparent;
   color: var(--text-muted);
+  opacity: 1 !important;
+}
+
+.track-card-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
+.track-card-actions .playlist-row-btn {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.track-card-actions .playlist-row-btn:hover {
+  border-color: rgba(167, 139, 250, 0.32);
+  background: rgba(167, 139, 250, 0.12) !important;
+}
+
+.track-card-actions .card-like-btn[aria-pressed="true"] {
+  border-color: rgba(251, 113, 133, 0.28);
+  background: rgba(251, 113, 133, 0.1);
+}
+
+.playlist-row-btn[aria-pressed="true"],
+#likeBtn[aria-pressed="true"],
+#focusLikeBtn[aria-pressed="true"] {
+  color: #fb7185 !important;
+}
+
+.playlist-row-btn[aria-pressed="true"] svg,
+#likeBtn[aria-pressed="true"] svg,
+#focusLikeBtn[aria-pressed="true"] svg {
+  fill: currentColor !important;
 }
 
 .playlist-row-btn:hover,
@@ -3696,13 +3847,28 @@ select:focus {
   box-shadow: 0 0 0 4px rgba(139, 92, 246, .14) !important;
 }
 
+.card-like-btn,
 .card-add-btn,
+.row-like-btn,
 .row-add-btn,
 .list-add-btn,
+.profile-like-btn,
 .profile-add-btn,
+.search-like-btn,
 .search-add-btn,
 .detail-add-btn,
-#addToPlaylistBtn { display: none !important; }
+#likeBtn,
+#focusLikeBtn,
+#addToPlaylistBtn {
+  display: inline-flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+.track-card-actions .playlist-row-btn {
+  color: rgba(245, 247, 255, .72);
+  background: rgba(255, 255, 255, .055);
+}
 
 body.compact-ui #appContent { padding-top: 10px !important; }
 body.compact-ui .profile-track,
@@ -3753,6 +3919,22 @@ body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after 
 
   .random-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1100px) {
+  header {
+    gap: 6px !important;
+    padding-inline: 10px !important;
+  }
+
+  header .search-island {
+    max-width: 340px !important;
+    padding-inline: 16px !important;
+  }
+
+  #hdrNotifications {
+    display: none !important;
   }
 }
 
@@ -4204,7 +4386,7 @@ body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after 
   }
 
   .random-card .playlist-row-btn {
-    display: none;
+    display: inline-flex;
   }
 
   .fav-track-row > span:first-child,
@@ -4226,7 +4408,7 @@ body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after 
   .station-track .row-like-btn,
   .artist-track .row-like-btn,
   .quick-track .row-like-btn {
-    display: none;
+    display: inline-flex;
   }
 
   #focusOverlay .flex.flex-col.items-center {
