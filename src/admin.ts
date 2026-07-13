@@ -1,4 +1,7 @@
 import { API_BASE_URL, adminHeaders, getAdminApiKey, setAdminSessionKey } from "./api/musicApi";
+import { disableNativeContextMenu } from "./contextMenu";
+
+disableNativeContextMenu();
 
 interface AdminTrack {
   id: number;

@@ -424,7 +424,8 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
   const region = track.region || undefined;
   const tags = [...new Set([...(track.tags || []), genre, region].filter(Boolean).map(String))];
   const audioSrc = resolveBackendUrl(track.audio_src);
-  const isPlayable = Boolean(track.is_playable && (track.audio_src || track.source_url));
+  const hasPlaybackSource = Boolean(track.audio_src || track.source_url);
+  const isPlayable = Boolean((track.is_playable ?? hasPlaybackSource) && hasPlaybackSource);
 
   return {
     id: String(track.id),

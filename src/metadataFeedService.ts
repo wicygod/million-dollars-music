@@ -536,6 +536,17 @@ function isTrustedCachedTrack(track: Track): boolean {
   return Boolean(track?.id && track?.title && track?.artist);
 }
 
+function normalizeCachedTrack(track: Track, source: MetadataProviderState): Track {
+  return {
+    ...track,
+    id: String(track.id),
+    providerState: source,
+    liked: false,
+    isPlayable: Boolean(track.isPlayable && (track.audioSrc || track.sourceUrl)),
+    audioSrc: track.audioSrc || null,
+  };
+}
+
 function readCachedFeed(allowStale: boolean): MetadataFeed | null {
   try {
     const raw = localStorage.getItem(FEED_CACHE_KEY);
@@ -545,22 +556,21 @@ function readCachedFeed(allowStale: boolean): MetadataFeed | null {
     if (!cached.all.every(isTrustedCachedTrack)) return null;
     if (!allowStale && Date.now() - cached.loadedAt > FEED_TTL_MS) return null;
     const source: MetadataProviderState = "cache";
-    const normalized = cached.all.map((track) => ({
-      ...track,
-      id: String(track.id),
-      providerState: source,
-      liked: false,
-      isPlayable: Boolean(track.isPlayable && track.audioSrc),
-      audioSrc: track.audioSrc || null,
-    }));
+    const normalized = cached.all.map((track) => normalizeCachedTrack(track, source));
+    const normalizedById = new Map(normalized.map((track) => [track.id, track]));
+    const normalizeCollection = (items: Track[] | undefined, fallback: Track[]): Track[] => (
+      items?.length
+        ? items.map((track) => normalizedById.get(String(track.id)) || normalizeCachedTrack(track, source))
+        : fallback
+    );
     return {
       recent: [],
-      random: cached.random?.length ? cached.random.map((track) => ({ ...track, providerState: source, liked: false })) : normalized.slice(0, 24),
-      trending: cached.trending?.length ? cached.trending.map((track) => ({ ...track, providerState: source, liked: false })) : normalized.slice(0, 12),
-      top: cached.top?.length ? cached.top.map((track) => ({ ...track, providerState: source, liked: false })) : normalized.slice(0, 12),
-      mood: cached.mood?.length ? cached.mood.map((track) => ({ ...track, providerState: source, liked: false })) : normalized.slice(0, 12),
-      ru: cached.ru?.length ? cached.ru.map((track) => ({ ...track, providerState: source, liked: false })) : normalized.filter((track) => track.region === "ru").slice(0, 12),
-      global: cached.global?.length ? cached.global.map((track) => ({ ...track, providerState: source, liked: false })) : normalized.filter((track) => track.region === "global").slice(0, 12),
+      random: normalizeCollection(cached.random, normalized.slice(0, 24)),
+      trending: normalizeCollection(cached.trending, normalized.slice(0, 12)),
+      top: normalizeCollection(cached.top, normalized.slice(0, 12)),
+      mood: normalizeCollection(cached.mood, normalized.slice(0, 12)),
+      ru: normalizeCollection(cached.ru, normalized.filter((track) => track.region === "ru").slice(0, 12)),
+      global: normalizeCollection(cached.global, normalized.filter((track) => track.region === "global").slice(0, 12)),
       all: normalized,
       source,
       loadedAt: cached.loadedAt,

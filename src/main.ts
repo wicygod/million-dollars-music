@@ -4,6 +4,7 @@ import { applyHistorySummaryToProfile, pluralizeTracks } from "./features/profil
 import { filterLocalSearchTracks, highlightMatch } from "./features/search";
 import { ACCENT_COLORS, DEFAULT_SETTINGS, settingSwitch, type PlayerSettings } from "./features/settings";
 import { loadHlsConstructor, type HlsPlayer } from "./player/hlsLoader";
+import { disableNativeContextMenu } from "./contextMenu";
 import {
   addListeningTime,
   API_BASE_URL,
@@ -30,6 +31,8 @@ import {
   updateNickname,
   withAppToken,
 } from "./api/musicApi";
+
+disableNativeContextMenu();
 
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
@@ -90,14 +93,14 @@ let player = {
   playing: false,
   buffering: false,
   currentTime: 0,
-  currentTrackId: tracks[0]?.id ?? "",
+  currentTrackId: "" as TrackId,
   queue: [] as TrackId[],
   queueIndex: -1,
   interval: null as number | null,
   repeat: false,
   shuffle: false,
 };
-let keepPlayerEmptyUntilSelection = false;
+let keepPlayerEmptyUntilSelection = true;
 
 const nowPlayingTitle = document.getElementById("nowPlayingTitle")!;
 const nowPlayingArtist = document.getElementById("nowPlayingArtist")!;
@@ -4031,9 +4034,8 @@ document.addEventListener("pointerout", (event) => {
 // ----------------------------------------------------------------
 
 hydrateAccountState(true);
-setQueueFromTracks(tracks, tracks[0]?.id ?? "");
+resetPlayerForNewAccount();
 updateVolumeUi();
-if (tracks[0]) loadTrackById(tracks[0].id, false);
 window.addEventListener("auth:required", () => {
   currentAuthUser = null;
   showAuthScreen("Для продолжения войдите в аккаунт.");

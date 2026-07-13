@@ -107,14 +107,14 @@
     <footer class="player-bar w-full shrink-0 border-t border-white/10">
       <div class="flex items-center gap-4 px-5 h-full max-w-screen-2xl mx-auto w-full">
         <div class="flex items-center gap-2 min-w-0 w-64 shrink-0">
-          <button id="nowPlayingFocus" class="player-meta-button min-w-0 flex-1" type="button" aria-label="Открыть полноэкранный плеер">
-            <span id="nowPlayingArt" class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shrink-0 flex items-center justify-center text-sm border border-white/10 relative" aria-hidden="true">♪</span>
+          <button id="nowPlayingFocus" class="player-meta-button min-w-0 flex-1" type="button" aria-label="Плеер пуст — выберите трек" disabled>
+            <span id="nowPlayingArt" class="w-12 h-12 rounded-xl shrink-0 flex items-center justify-center text-sm border border-white/10 relative player-empty-art" aria-hidden="true">♪</span>
             <span class="min-w-0 block">
-              <span id="nowPlayingTitle" class="track-title-selectable text-sm font-medium truncate block">Obsessed</span>
-              <span id="nowPlayingArtist" class="text-xs text-white/40 truncate block">Mariah Carey</span>
+              <span id="nowPlayingTitle" class="track-title-selectable text-sm font-medium truncate block">Выберите трек</span>
+              <span id="nowPlayingArtist" class="text-xs text-white/40 truncate block">Музыка появится здесь</span>
             </span>
           </button>
-          <button id="likeBtn" class="text-white/30 hover:text-red-400 transition-all duration-300 shrink-0 cursor-pointer active:scale-90" type="button" aria-label="Добавить текущий трек в избранное" aria-pressed="false">
+          <button id="likeBtn" class="text-white/30 hover:text-red-400 transition-all duration-300 shrink-0 cursor-pointer active:scale-90" type="button" aria-label="Нет выбранного трека" aria-pressed="false" disabled>
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
           </button>
         </div>
@@ -123,13 +123,13 @@
             <button id="repeatBtn" class="text-white/40 hover:text-indigo-400 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Повтор" aria-pressed="false">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
             </button>
-            <button id="prevBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Предыдущий трек">
+            <button id="prevBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Предыдущий трек" disabled>
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
             </button>
-            <button id="playBtn" class="w-9 h-9 rounded-full bg-white flex items-center justify-center hover:scale-110 transition-all duration-300 cursor-pointer active:scale-90 hover:shadow-[0_0_20px_rgba(255,255,255,0.3)]" type="button" aria-label="Воспроизвести">
+            <button id="playBtn" class="w-9 h-9 rounded-full bg-white flex items-center justify-center hover:scale-110 transition-all duration-300 cursor-pointer active:scale-90 hover:shadow-[0_0_20px_rgba(255,255,255,0.3)]" type="button" aria-label="Воспроизвести" disabled>
               <svg id="playIcon" class="w-4 h-4 text-black ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             </button>
-            <button id="nextBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Следующий трек">
+            <button id="nextBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Следующий трек" disabled>
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
             </button>
             <button id="shufflePlayBtn" class="text-white/40 hover:text-indigo-400 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Перемешать" aria-pressed="false">
@@ -146,7 +146,7 @@
           </div>
         </div>
         <div class="flex items-center gap-2 w-36 shrink-0 justify-end">
-          <button id="queueBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Открыть очередь" aria-expanded="false">
+          <button id="queueBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Открыть очередь" aria-expanded="false" disabled>
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h11M4 12h11M4 18h7m7-3v6m-3-3h6"/></svg>
           </button>
           <button id="volumeBtn" class="text-white/40 hover:text-white/80 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Отключить звук" aria-pressed="false">
@@ -166,16 +166,16 @@
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
       </button>
       <div class="focus-player-stage flex flex-col items-center justify-center gap-5 px-8">
-        <div id="focusArt" class="w-72 h-72 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 shrink-0 border border-white/10 shadow-2xl" aria-hidden="true"></div>
+        <div id="focusArt" class="w-72 h-72 rounded-2xl shrink-0 border border-white/10 shadow-2xl flex items-center justify-center text-6xl player-empty-art" aria-hidden="true">♪</div>
         <div class="text-center max-w-md">
-          <p id="focusTitle" class="track-title-selectable text-2xl font-bold tracking-tight">Obsessed</p>
-          <p id="focusArtist" class="text-sm text-white/50 mt-1">Mariah Carey</p>
+          <p id="focusTitle" class="track-title-selectable text-2xl font-bold tracking-tight">Выберите трек</p>
+          <p id="focusArtist" class="text-sm text-white/50 mt-1">Музыка появится здесь</p>
         </div>
         <div class="focus-transport" aria-label="Управление воспроизведением">
           <button id="focusShuffleBtn" type="button" aria-label="Перемешать" aria-pressed="false"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h2.5a4 4 0 013.2 1.6l4.6 6.1a4 4 0 003.2 1.6H20m0 0-3-3m3 3-3 3M4 17h2.5a4 4 0 003.2-1.6l4.6-6.1a4 4 0 013.2-1.6H20m0 0-3-3m3 3-3 3"/></svg></button>
-          <button id="focusPrevBtn" type="button" aria-label="Предыдущий трек"><svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6V5zm3.5 7L18 5v14l-8.5-7z"/></svg></button>
-          <button id="focusPlayBtn" type="button" aria-label="Воспроизвести"><svg id="focusPlayIcon" class="w-7 h-7 ml-0.5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
-          <button id="focusNextBtn" type="button" aria-label="Следующий трек"><svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2V5zM6 5l8.5 7L6 19V5z"/></svg></button>
+          <button id="focusPrevBtn" type="button" aria-label="Предыдущий трек" disabled><svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6V5zm3.5 7L18 5v14l-8.5-7z"/></svg></button>
+          <button id="focusPlayBtn" type="button" aria-label="Воспроизвести" disabled><svg id="focusPlayIcon" class="w-7 h-7 ml-0.5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
+          <button id="focusNextBtn" type="button" aria-label="Следующий трек" disabled><svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2V5zM6 5l8.5 7L6 19V5z"/></svg></button>
           <button id="focusRepeatBtn" type="button" aria-label="Повтор" aria-pressed="false"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M5.5 15A7 7 0 0018 17m.5-8A7 7 0 006 7"/></svg></button>
         </div>
         <div class="flex items-center gap-3 w-full max-w-sm">
@@ -186,10 +186,10 @@
           </div>
           <span id="focusTotalTime" class="text-xs text-white/40 w-8 tabular-nums">0:00</span>
         </div>
-        <button id="focusLikeBtn" class="text-white/30 hover:text-red-400 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Добавить текущий трек в избранное" aria-pressed="false">
+        <button id="focusLikeBtn" class="text-white/30 hover:text-red-400 transition-all duration-300 cursor-pointer active:scale-90" type="button" aria-label="Нет выбранного трека" aria-pressed="false" disabled>
           <svg class="w-12 h-12 heart-beat" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
         </button>
-        <button id="focusQueueBtn" class="focus-queue-button" type="button">Очередь воспроизведения</button>
+        <button id="focusQueueBtn" class="focus-queue-button" type="button" disabled>Очередь воспроизведения</button>
       </div>
     </div>
 
