@@ -46,9 +46,38 @@ export interface AuthUser {
   nickname: string;
   avatar_url?: string | null;
   subscription_status: string;
+  is_premium?: boolean;
   music_preferences_completed_at?: string | null;
   created_at: string;
   is_banned?: boolean;
+}
+
+export interface SubscriptionPlan {
+  id: string;
+  name: string;
+  description: string;
+  priceMinor: number;
+  currency: string;
+  billingPeriod: "month";
+  features: string[];
+  purchaseAvailable: boolean;
+  checkoutMode: "preview";
+}
+
+export interface SubscriptionStatus {
+  status: string;
+  isPremium: boolean;
+  entitlements: string[];
+  planId: string | null;
+  purchaseAvailable: boolean;
+}
+
+export interface CheckoutPreview {
+  id: string;
+  status: "preview";
+  plan: SubscriptionPlan;
+  activationPerformed: boolean;
+  message: string;
 }
 
 export interface AuthResponse {
@@ -437,6 +466,71 @@ export async function fetchCurrentUser(): Promise<AuthUser> {
   const user = await response.json() as AuthUser;
   setStoredAuthUser(user);
   return user;
+}
+
+type WireSubscriptionPlan = {
+  id: string;
+  name: string;
+  description: string;
+  price_minor: number;
+  currency: string;
+  billing_period: "month";
+  features: string[];
+  purchase_available: boolean;
+  checkout_mode: "preview";
+};
+
+function mapSubscriptionPlan(plan: WireSubscriptionPlan): SubscriptionPlan {
+  return {
+    id: plan.id,
+    name: plan.name,
+    description: plan.description,
+    priceMinor: plan.price_minor,
+    currency: plan.currency,
+    billingPeriod: plan.billing_period,
+    features: [...plan.features],
+    purchaseAvailable: plan.purchase_available,
+    checkoutMode: plan.checkout_mode,
+  };
+}
+
+export async function getSubscriptionPlans(): Promise<SubscriptionPlan[]> {
+  const plans = await apiFetch<WireSubscriptionPlan[]>("/api/subscriptions/plans");
+  return plans.map(mapSubscriptionPlan);
+}
+
+export async function getMySubscription(): Promise<SubscriptionStatus> {
+  const status = await apiFetch<{
+    status: string;
+    is_premium: boolean;
+    entitlements: string[];
+    plan_id: string | null;
+    purchase_available: boolean;
+  }>("/api/subscriptions/me");
+  return {
+    status: status.status,
+    isPremium: status.is_premium,
+    entitlements: [...status.entitlements],
+    planId: status.plan_id,
+    purchaseAvailable: status.purchase_available,
+  };
+}
+
+export async function createCheckoutPreview(planId: string): Promise<CheckoutPreview> {
+  const preview = await apiSend<{
+    id: string;
+    status: "preview";
+    plan: WireSubscriptionPlan;
+    activation_performed: boolean;
+    message: string;
+  }>("/api/subscriptions/checkout-preview", { plan_id: planId });
+  return {
+    id: preview.id,
+    status: preview.status,
+    plan: mapSubscriptionPlan(preview.plan),
+    activationPerformed: preview.activation_performed,
+    message: preview.message,
+  };
 }
 
 export async function updateNickname(nickname: string): Promise<AuthUser> {

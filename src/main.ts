@@ -19,12 +19,14 @@ import {
 } from "./features/artistOnboarding";
 import { PlaybackSessionTracker, type PlaybackEndReason, type PlaybackSessionEvent } from "./features/playbackSession";
 import { selectPopularTracks } from "./features/popularChart";
+import { formatSubscriptionPrice, hasPremiumAccess } from "./features/subscription";
 import { loadHlsConstructor, type HlsPlayer } from "./player/hlsLoader";
 import { disableNativeContextMenu } from "./contextMenu";
 import {
   addListeningTime,
   API_BASE_URL,
   clearAuthToken,
+  createCheckoutPreview,
   createStreamTicket,
   fetchCurrentUser,
   getArtist as fetchArtist,
@@ -32,7 +34,9 @@ import {
   getAuthToken,
   getHistorySummary,
   getMusicPreferences,
+  getMySubscription,
   getOnboardingArtists,
+  getSubscriptionPlans,
   getUserFavorites,
   getStoredAuthUser,
   getTrack as fetchTrack,
@@ -49,9 +53,11 @@ import {
   submitBugReport,
   submitPlaybackEvent,
   setUserFavorite,
+  setStoredAuthUser,
   type AuthResponse,
   type AuthUser,
   type OnboardingArtist,
+  type SubscriptionPlan,
   updateAvatar,
   updateNickname,
   withAppToken,
@@ -69,6 +75,7 @@ type TrackId = Track["id"];
 let metadataFeed: MetadataFeed = getInitialMetadataFeed();
 let tracks: Track[] = [...metadataFeed.all];
 let currentAuthUser: AuthUser | null = getStoredAuthUser();
+let subscriptionPlansCache: SubscriptionPlan[] | null = null;
 let artistOnboardingState: ArtistOnboardingState<OnboardingArtist> = createArtistOnboardingState<OnboardingArtist>();
 let artistOnboardingMode: "onboarding" | "settings" = "onboarding";
 let artistOnboardingRequest = 0;
@@ -208,7 +215,25 @@ let equalizerState: EqualizerState = { ...DEFAULT_EQUALIZER, gains: [...DEFAULT_
 const equalizerEngine = new EqualizerEngine(audioEl);
 
 function applyEqualizerGains() {
+  if (!hasPremiumAccess(currentAuthUser || getStoredAuthUser()) && equalizerState.enabled) {
+    equalizerState = { ...equalizerState, enabled: false };
+  }
   equalizerEngine.apply(equalizerState);
+}
+
+function syncPremiumControls(): void {
+  const premium = hasPremiumAccess(currentAuthUser || getStoredAuthUser());
+  const button = document.getElementById("hdrEqualizer");
+  button?.classList.toggle("is-premium-locked", !premium);
+  button?.setAttribute("aria-label", premium ? "Открыть эквалайзер" : "Эквалайзер — функция Premium");
+}
+
+function enforcePremiumAudioAccess(): void {
+  if (!hasPremiumAccess(currentAuthUser || getStoredAuthUser()) && equalizerState.enabled) {
+    equalizerState = { ...equalizerState, enabled: false };
+  }
+  applyEqualizerGains();
+  syncPremiumControls();
 }
 
 async function ensureAudioGraph(): Promise<boolean> {
@@ -1447,6 +1472,7 @@ function bootstrapAuthenticatedApp() {
       const previousUserId = currentAuthUser?.id;
       currentAuthUser = user;
       if (previousUserId !== user.id) hydrateAccountState(true);
+      else enforcePremiumAudioAccess();
       hideAuthScreen();
       if (user.music_preferences_completed_at === null) {
         if (!document.getElementById("artistOnboardingOverlay")?.classList.contains("is-visible")) {
@@ -2252,7 +2278,8 @@ function renderProfile(container: HTMLElement) {
   }, {});
   const favoriteGenre = Object.entries(genreCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
   const joinedAt = user?.created_at ? new Date(user.created_at).toLocaleDateString("ru-RU", { month: "long", year: "numeric" }) : "недавно";
-  const subscription = user?.subscription_status === "premium" ? "Premium" : "Free";
+  const isPremium = hasPremiumAccess(user);
+  const subscription = isPremium ? "Premium" : "Free";
   const avatarHtml = user?.avatar_url
     ? `<img class="profile-avatar-img" src="${escapeHtml(user.avatar_url)}" alt="${escapeHtml(user.nickname)}" />`
     : `<span>${escapeHtml(authInitials(user))}</span>`;
@@ -2263,12 +2290,13 @@ function renderProfile(container: HTMLElement) {
       <div class="profile-identity">
         <h2>${escapeHtml(user?.nickname || "Пользователь")}</h2>
         <p>@${escapeHtml(user?.login || "login")} · с нами с ${escapeHtml(joinedAt)}</p>
-        <span class="profile-badge">${subscription}</span>
+        <span class="profile-badge ${isPremium ? "is-premium" : ""}">${subscription}</span>
       </div>
       <div class="profile-hero-actions">
         <button id="profileFavoritesBtn" class="profile-action-btn" type="button">Избранное</button>
         <button id="profileMusicTasteBtn" class="profile-action-btn" type="button">Музыкальный вкус</button>
-        <button id="profileEqualizerBtn" class="profile-action-btn" type="button">Эквалайзер</button>
+        <button id="profileEqualizerBtn" class="profile-action-btn ${isPremium ? "" : "is-premium-locked"}" type="button">${isPremium ? "Эквалайзер" : "Эквалайзер · Premium"}</button>
+        <button id="profilePremiumBtn" class="profile-action-btn profile-premium-btn ${isPremium ? "is-active" : ""}" type="button">${isPremium ? "Premium активен" : "Получить Premium"}</button>
         <button id="profileSettingsBtn" class="profile-action-btn" type="button">Настройки</button>
       </div>
     </section>
@@ -2318,6 +2346,7 @@ function renderProfile(container: HTMLElement) {
   container.querySelector("#profileMusicTasteBtn")?.addEventListener("click", () => void showArtistOnboarding("settings"));
   container.querySelector("#profileSettingsBtn")?.addEventListener("click", () => switchPage("settings"));
   container.querySelector("#profileEqualizerBtn")?.addEventListener("click", showEqualizerModal);
+  container.querySelector("#profilePremiumBtn")?.addEventListener("click", () => showPremiumSubscriptionModal("profile"));
 
   void flushListeningProgress().then(() => getHistorySummary()).then((summary) => {
     if (!isCurrentProfile()) return;
@@ -2606,7 +2635,197 @@ makeDraggable(focusTimeline, focusTimelineFill, focusTimelineThumb, (pct) => {
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
+type SubscriptionModalSource = "equalizer" | "profile" | "settings";
+
+function showPremiumSubscriptionModal(source: SubscriptionModalSource = "equalizer"): void {
+  document.querySelector(".subscription-overlay")?.remove();
+  const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const overlay = document.createElement("div");
+  overlay.className = "subscription-overlay";
+  overlay.innerHTML = `
+    <section class="subscription-modal" role="dialog" aria-modal="true" aria-labelledby="subscriptionTitle" aria-describedby="subscriptionDescription">
+      <div class="subscription-modal-content" aria-live="polite"></div>
+    </section>
+  `;
+  document.body.appendChild(overlay);
+  const content = overlay.querySelector<HTMLElement>(".subscription-modal-content")!;
+  const sourceCopy = source === "equalizer"
+    ? "Эквалайзер входит в Premium"
+    : source === "settings"
+      ? "Расширьте возможности звука"
+      : "Подписка Million Music";
+
+  const close = () => {
+    document.removeEventListener("keydown", onKeyDown);
+    overlay.remove();
+    returnFocus?.focus();
+  };
+  const focusFirst = () => window.setTimeout(() => overlay.querySelector<HTMLElement>("button")?.focus(), 20);
+  const bindClose = () => overlay.querySelectorAll<HTMLButtonElement>("[data-subscription-close]").forEach((button) => button.addEventListener("click", close));
+  const closeIcon = `
+    <button class="subscription-close" data-subscription-close type="button" aria-label="Закрыть">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  `;
+  const premiumMark = `
+    <div class="subscription-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 17l-1-9 5 4 4-7 4 7 5-4-1 9H4Z"/><path d="M5 20h14"/></svg>
+    </div>
+  `;
+  const featureIcon = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+  `;
+
+  const renderLoading = () => {
+    content.innerHTML = `
+      ${closeIcon}
+      <div class="subscription-loading"><span class="subscription-spinner" aria-hidden="true"></span><strong>Загружаем Premium</strong><small>Проверяем подписку и актуальный тариф</small></div>
+    `;
+    bindClose();
+  };
+
+  const renderError = () => {
+    content.innerHTML = `
+      ${closeIcon}
+      <div class="subscription-state-icon is-error" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 8v5M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg></div>
+      <p class="subscription-kicker">PREMIUM</p>
+      <h2 id="subscriptionTitle">Не удалось загрузить тариф</h2>
+      <p id="subscriptionDescription" class="subscription-copy">Проверьте подключение к серверу. Статус аккаунта не изменён.</p>
+      <div class="subscription-actions"><button class="subscription-secondary" data-subscription-close type="button">Закрыть</button><button class="subscription-primary" data-subscription-retry type="button">Повторить</button></div>
+    `;
+    bindClose();
+    overlay.querySelector("[data-subscription-retry]")?.addEventListener("click", () => void loadSubscription());
+    focusFirst();
+  };
+
+  const renderActive = (plan: SubscriptionPlan) => {
+    content.innerHTML = `
+      ${closeIcon}
+      <div class="subscription-active-head">${premiumMark}<div><p class="subscription-kicker">PREMIUM АКТИВЕН</p><h2 id="subscriptionTitle">Ваш звук — без ограничений</h2></div></div>
+      <p id="subscriptionDescription" class="subscription-copy">Эквалайзер и все его профили доступны этому аккаунту.</p>
+      <div class="subscription-feature-list">${plan.features.map((feature) => `<div>${featureIcon}<span>${escapeHtml(feature)}</span></div>`).join("")}</div>
+      <div class="subscription-actions"><button class="subscription-secondary" data-subscription-close type="button">Закрыть</button><button class="subscription-primary" data-open-premium-equalizer type="button">Открыть эквалайзер</button></div>
+    `;
+    bindClose();
+    overlay.querySelector("[data-open-premium-equalizer]")?.addEventListener("click", () => {
+      close();
+      showEqualizerModal();
+    });
+    focusFirst();
+  };
+
+  const renderCompletedPreview = (plan: SubscriptionPlan) => {
+    content.innerHTML = `
+      ${closeIcon}
+      <div class="subscription-state-icon is-success" aria-hidden="true">${featureIcon}</div>
+      <p class="subscription-kicker">ДЕМО-ОФОРМЛЕНИЕ</p>
+      <h2 id="subscriptionTitle">Макет покупки готов</h2>
+      <p id="subscriptionDescription" class="subscription-copy">Деньги не списаны, а Premium не активирован. Пока подписку можно выдать через админ-панель.</p>
+      <div class="subscription-preview-summary"><span>${escapeHtml(plan.name)}</span><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))} / месяц</strong></div>
+      <button class="subscription-primary is-wide" data-subscription-close type="button">Понятно</button>
+    `;
+    bindClose();
+    focusFirst();
+  };
+
+  const renderCheckout = (plan: SubscriptionPlan) => {
+    content.innerHTML = `
+      ${closeIcon}
+      <div class="subscription-checkout-head"><button class="subscription-back" data-subscription-back type="button" aria-label="Вернуться к тарифу"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><div><p class="subscription-kicker">МАКЕТ ПОКУПКИ</p><h2 id="subscriptionTitle">Оформление Premium</h2></div></div>
+      <p id="subscriptionDescription" class="subscription-copy">Это безопасный предварительный экран. Мы не запрашиваем данные карты и ничего не списываем.</p>
+      <div class="subscription-order-row"><div><span>${escapeHtml(plan.name)}</span><small>Ежемесячная подписка</small></div><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))}</strong></div>
+      <div class="subscription-payment-placeholder"><div class="subscription-card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 10h18M7 15h3"/></svg></div><div><strong>Банковская карта</strong><small>Появится после подключения платёжного провайдера</small></div><span>Скоро</span></div>
+      <div class="subscription-demo-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg><span>Нажатие ниже создаст только демо-предпросмотр и не изменит вашу подписку.</span></div>
+      <button class="subscription-primary is-wide" data-subscription-confirm type="button">Подтвердить демо-заказ</button>
+    `;
+    bindClose();
+    overlay.querySelector("[data-subscription-back]")?.addEventListener("click", () => renderOffer(plan));
+    overlay.querySelector<HTMLButtonElement>("[data-subscription-confirm]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      button.textContent = "Готовим макет…";
+      try {
+        const preview = await createCheckoutPreview(plan.id);
+        if (preview.activationPerformed) throw new Error("Preview unexpectedly activated subscription");
+        renderCompletedPreview(preview.plan);
+      } catch {
+        button.disabled = false;
+        button.textContent = "Повторить демо-заказ";
+        showTrackNotice("Не удалось подготовить макет покупки");
+      }
+    });
+    focusFirst();
+  };
+
+  const renderOffer = (plan: SubscriptionPlan) => {
+    content.innerHTML = `
+      ${closeIcon}
+      <div class="subscription-hero">
+        <div>${premiumMark}<p class="subscription-kicker">${escapeHtml(sourceCopy.toUpperCase())}</p><h2 id="subscriptionTitle">Настройте музыку под себя</h2><p id="subscriptionDescription" class="subscription-copy">Premium открывает профессиональный эквалайзер и точный контроль звучания.</p></div>
+        <div class="subscription-price"><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))}</strong><span>в месяц</span><small>Цена в макете</small></div>
+      </div>
+      <div class="subscription-feature-list">${plan.features.map((feature) => `<div>${featureIcon}<span>${escapeHtml(feature)}</span></div>`).join("")}</div>
+      <div class="subscription-plan-note"><span>Premium</span><small>Оплата пока не подключена — можно безопасно посмотреть весь сценарий.</small></div>
+      <button class="subscription-primary is-wide" data-subscription-checkout type="button">Посмотреть макет покупки</button>
+      <p class="subscription-legal">Никаких реальных платёжных данных и списаний на этом этапе.</p>
+    `;
+    bindClose();
+    overlay.querySelector("[data-subscription-checkout]")?.addEventListener("click", () => renderCheckout(plan));
+    focusFirst();
+  };
+
+  async function loadSubscription(): Promise<void> {
+    renderLoading();
+    try {
+      const [plans, status] = await Promise.all([
+        subscriptionPlansCache ? Promise.resolve(subscriptionPlansCache) : getSubscriptionPlans(),
+        getMySubscription(),
+      ]);
+      subscriptionPlansCache = plans;
+      const plan = plans[0];
+      if (!plan) throw new Error("No subscription plan configured");
+      if (currentAuthUser) {
+        currentAuthUser = { ...currentAuthUser, subscription_status: status.status, is_premium: status.isPremium };
+        setStoredAuthUser(currentAuthUser);
+      }
+      enforcePremiumAudioAccess();
+      if (status.isPremium) renderActive(plan);
+      else renderOffer(plan);
+    } catch {
+      renderError();
+    }
+  }
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...overlay.querySelectorAll<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex='-1'])")];
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  document.addEventListener("keydown", onKeyDown);
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+  void loadSubscription();
+}
+
 function showEqualizerModal() {
+  if (!hasPremiumAccess(currentAuthUser || getStoredAuthUser())) {
+    enforcePremiumAudioAccess();
+    showPremiumSubscriptionModal("equalizer");
+    return;
+  }
   document.querySelector(".equalizer-overlay")?.remove();
   const trigger = document.getElementById("hdrEqualizer") as HTMLButtonElement | null;
   const overlay = document.createElement("div");
@@ -2758,6 +2977,12 @@ function showEqualizerModal() {
     else saveTimer = window.setTimeout(persistEqualizer, 180);
   };
   const ensureEqualizerAvailable = async () => {
+    if (!hasPremiumAccess(currentAuthUser || getStoredAuthUser())) {
+      close();
+      enforcePremiumAudioAccess();
+      showPremiumSubscriptionModal("equalizer");
+      return false;
+    }
     if (await ensureAudioGraph()) return true;
     statusTitle.textContent = "Обработка недоступна";
     safetyStatus.classList.add("is-error");
@@ -2848,11 +3073,17 @@ function showEqualizerModal() {
 
 function renderSettings(container: HTMLElement) {
   const s = getPlayerSettings();
+  const isPremium = hasPremiumAccess(currentAuthUser || getStoredAuthUser());
   container.innerHTML = `
     <div class="radio-section-head">
       <div><h2 class="text-base font-semibold tracking-wide">Настройки</h2><p>Управляйте звуком, поведением и внешним видом приложения</p></div>
       <button id="resetSettingsBtn" class="settings-reset-btn" type="button">Сбросить настройки</button>
     </div>
+    <section class="settings-premium-banner ${isPremium ? "is-active" : ""}">
+      <div class="settings-premium-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 17l-1-9 5 4 4-7 4 7 5-4-1 9H4Z"/><path d="M5 20h14"/></svg></div>
+      <div><strong>${isPremium ? "Premium активен" : "Откройте Premium-звук"}</strong><small>${isPremium ? "Эквалайзер и звуковые профили доступны вашему аккаунту" : "10-полосный эквалайзер, усиление баса и точная настройка звучания"}</small></div>
+      <button id="openPremiumSettings" class="profile-action-btn profile-premium-btn ${isPremium ? "is-active" : ""}" type="button">${isPremium ? "Управление" : "Узнать больше"}</button>
+    </section>
     <div class="settings-layout">
       <section class="settings-card-v2">
         <div class="settings-section-head"><h3>Внешний вид</h3><span>Интерфейс</span></div>
@@ -2880,7 +3111,7 @@ function renderSettings(container: HTMLElement) {
       <section class="settings-card-v2 is-wide">
         <div class="settings-section-head"><h3>Персональный звук</h3><span>10 полос</span></div>
         <div class="setting-row"><div><strong>Музыкальные предпочтения</strong><small>Изменить любимых артистов и обновить персональную ленту</small></div><button id="openMusicPreferences" class="profile-action-btn" type="button">Выбрать артистов</button></div>
-        <div class="setting-row"><div><strong>Эквалайзер</strong><small>${equalizerState.enabled ? `Активен профиль «${EQ_PRESETS[equalizerState.preset].label}»` : "Сейчас звук воспроизводится без коррекции"}</small></div><button id="openEqualizerSettings" class="profile-action-btn" type="button">Настроить</button></div>
+        <div class="setting-row ${isPremium ? "" : "is-premium-locked"}"><div><strong>Эквалайзер ${isPremium ? "" : "· Premium"}</strong><small>${isPremium ? (equalizerState.enabled ? `Активен профиль «${EQ_PRESETS[equalizerState.preset].label}»` : "Сейчас звук воспроизводится без коррекции") : "Доступен после активации Premium"}</small></div><button id="openEqualizerSettings" class="profile-action-btn" type="button">${isPremium ? "Настроить" : "Открыть Premium"}</button></div>
         <div class="setting-row"><div><strong>Million Music Desktop</strong><small>Версия 1.2 · защищённое подключение к музыкальному каталогу</small></div><span class="text-xs text-emerald-300">● Онлайн</span></div>
         <div class="setting-row"><div><strong>Помочь улучшить приложение</strong><small>Опишите проблему — отчёт попадёт в админ-панель</small></div><button id="bugReportBtn" class="profile-action-btn" type="button">Сообщить о баге</button></div>
       </section>
@@ -2898,6 +3129,7 @@ function renderSettings(container: HTMLElement) {
   });
   container.querySelector("#accentSelect")?.addEventListener("change", () => { saveSettings(); applySettingsEffects(); });
   container.querySelector("#openEqualizerSettings")?.addEventListener("click", showEqualizerModal);
+  container.querySelector("#openPremiumSettings")?.addEventListener("click", () => showPremiumSubscriptionModal("settings"));
   container.querySelector("#openMusicPreferences")?.addEventListener("click", () => void showArtistOnboarding("settings"));
   container.querySelector("#bugReportBtn")?.addEventListener("click", showBugReportModal);
   container.querySelector("#resetSettingsBtn")?.addEventListener("click", () => {
@@ -3695,6 +3927,7 @@ function hydrateAccountState(force = false) {
   loadUserPlaylists();
   loadPlaylistOrder();
   applySettingsEffects();
+  syncPremiumControls();
   renderSidebarPlaylists();
 }
 
