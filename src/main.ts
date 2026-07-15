@@ -19,14 +19,15 @@ import {
 } from "./features/artistOnboarding";
 import { PlaybackSessionTracker, type PlaybackEndReason, type PlaybackSessionEvent } from "./features/playbackSession";
 import { selectPopularTracks } from "./features/popularChart";
-import { formatSubscriptionPrice, hasPremiumAccess } from "./features/subscription";
+import { formatSubscriptionPrice, hasPremiumAccess, isTrustedCheckoutUrl } from "./features/subscription";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { loadHlsConstructor, type HlsPlayer } from "./player/hlsLoader";
 import { disableNativeContextMenu } from "./contextMenu";
 import {
   addListeningTime,
   API_BASE_URL,
   clearAuthToken,
-  createCheckoutPreview,
+  createMockCheckout,
   createStreamTicket,
   fetchCurrentUser,
   getArtist as fetchArtist,
@@ -57,6 +58,7 @@ import {
   type AuthResponse,
   type AuthUser,
   type OnboardingArtist,
+  type MockCheckout,
   type SubscriptionPlan,
   updateAvatar,
   updateNickname,
@@ -2649,6 +2651,7 @@ function showPremiumSubscriptionModal(source: SubscriptionModalSource = "equaliz
   `;
   document.body.appendChild(overlay);
   const content = overlay.querySelector<HTMLElement>(".subscription-modal-content")!;
+  let checkoutPollGeneration = 0;
   const sourceCopy = source === "equalizer"
     ? "Эквалайзер входит в Premium"
     : source === "settings"
@@ -2656,6 +2659,7 @@ function showPremiumSubscriptionModal(source: SubscriptionModalSource = "equaliz
       : "Подписка Million Music";
 
   const close = () => {
+    checkoutPollGeneration += 1;
     document.removeEventListener("keydown", onKeyDown);
     overlay.remove();
     returnFocus?.focus();
@@ -2714,44 +2718,122 @@ function showPremiumSubscriptionModal(source: SubscriptionModalSource = "equaliz
     focusFirst();
   };
 
-  const renderCompletedPreview = (plan: SubscriptionPlan) => {
+  const applyPremiumStatus = async (): Promise<boolean> => {
+    const status = await getMySubscription();
+    if (currentAuthUser) {
+      currentAuthUser = { ...currentAuthUser, subscription_status: status.status, is_premium: status.isPremium };
+      setStoredAuthUser(currentAuthUser);
+    }
+    enforcePremiumAudioAccess();
+    return status.isPremium;
+  };
+
+  const renderPaymentSuccess = (plan: SubscriptionPlan) => {
+    checkoutPollGeneration += 1;
     content.innerHTML = `
       ${closeIcon}
       <div class="subscription-state-icon is-success" aria-hidden="true">${featureIcon}</div>
-      <p class="subscription-kicker">ДЕМО-ОФОРМЛЕНИЕ</p>
-      <h2 id="subscriptionTitle">Макет покупки готов</h2>
-      <p id="subscriptionDescription" class="subscription-copy">Деньги не списаны, а Premium не активирован. Пока подписку можно выдать через админ-панель.</p>
+      <p class="subscription-kicker">ОПЛАТА ПОДТВЕРЖДЕНА</p>
+      <h2 id="subscriptionTitle">Premium подключён</h2>
+      <p id="subscriptionDescription" class="subscription-copy">Подписка уже сохранена в аккаунте. Эквалайзер и все звуковые профили доступны прямо сейчас.</p>
       <div class="subscription-preview-summary"><span>${escapeHtml(plan.name)}</span><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))} / месяц</strong></div>
-      <button class="subscription-primary is-wide" data-subscription-close type="button">Понятно</button>
+      <button class="subscription-primary is-wide" data-open-paid-equalizer type="button">Открыть эквалайзер</button>
     `;
     bindClose();
+    overlay.querySelector("[data-open-paid-equalizer]")?.addEventListener("click", () => {
+      close();
+      showEqualizerModal();
+    });
+    if (currentPage === "profile" || currentPage === "settings") switchPage(currentPage, currentPageParam);
+    showTrackNotice("Premium успешно подключён");
     focusFirst();
+  };
+
+  const renderWaitingForPayment = (plan: SubscriptionPlan, checkout: MockCheckout) => {
+    content.innerHTML = `
+      ${closeIcon}
+      <div class="subscription-loading subscription-payment-waiting">
+        <span class="subscription-spinner" aria-hidden="true"></span>
+        <p class="subscription-kicker">ОЖИДАЕМ ПОДТВЕРЖДЕНИЕ</p>
+        <h2 id="subscriptionTitle">Завершите оплату в браузере</h2>
+        <p id="subscriptionDescription" class="subscription-copy" data-checkout-status>Страница оплаты уже открыта. После её загрузки Premium появится здесь автоматически.</p>
+        <div class="subscription-actions is-compact"><button class="subscription-secondary" data-checkout-reopen type="button">Открыть сайт ещё раз</button><button class="subscription-primary" data-checkout-check type="button">Проверить подписку</button></div>
+      </div>
+    `;
+    bindClose();
+    overlay.querySelector<HTMLButtonElement>("[data-checkout-reopen]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try { await openCheckoutPage(checkout.checkoutUrl); }
+      catch { showTrackNotice("Не удалось открыть страницу оплаты"); }
+      finally { button.disabled = false; }
+    });
+    overlay.querySelector<HTMLButtonElement>("[data-checkout-check]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      button.textContent = "Проверяем…";
+      try {
+        if (await applyPremiumStatus()) renderPaymentSuccess(plan);
+        else {
+          button.disabled = false;
+          button.textContent = "Проверить подписку";
+          showTrackNotice("Платёж пока не подтверждён");
+        }
+      } catch {
+        button.disabled = false;
+        button.textContent = "Повторить проверку";
+      }
+    });
+    focusFirst();
+  };
+
+  const openCheckoutPage = async (checkoutUrl: string): Promise<void> => {
+    if (!isTrustedCheckoutUrl(checkoutUrl, API_BASE_URL)) throw new Error("Untrusted checkout URL");
+    await openUrl(checkoutUrl);
+  };
+
+  const pollForPayment = async (plan: SubscriptionPlan, checkout: MockCheckout): Promise<void> => {
+    const generation = ++checkoutPollGeneration;
+    const attempts = Math.min(60, Math.max(10, Math.floor(checkout.expiresInSeconds / 2)));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 700 : 1200));
+      if (generation !== checkoutPollGeneration || !overlay.isConnected) return;
+      try {
+        if (await applyPremiumStatus()) {
+          renderPaymentSuccess(plan);
+          return;
+        }
+      } catch { /* transient network errors are retried until the checkout expires */ }
+    }
+    const statusText = overlay.querySelector<HTMLElement>("[data-checkout-status]");
+    if (statusText) statusText.textContent = "Автоматическая проверка завершилась. Откройте страницу ещё раз или нажмите «Проверить подписку».";
   };
 
   const renderCheckout = (plan: SubscriptionPlan) => {
     content.innerHTML = `
       ${closeIcon}
-      <div class="subscription-checkout-head"><button class="subscription-back" data-subscription-back type="button" aria-label="Вернуться к тарифу"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><div><p class="subscription-kicker">МАКЕТ ПОКУПКИ</p><h2 id="subscriptionTitle">Оформление Premium</h2></div></div>
-      <p id="subscriptionDescription" class="subscription-copy">Это безопасный предварительный экран. Мы не запрашиваем данные карты и ничего не списываем.</p>
+      <div class="subscription-checkout-head"><button class="subscription-back" data-subscription-back type="button" aria-label="Вернуться к тарифу"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><div><p class="subscription-kicker">ТЕСТОВАЯ ОПЛАТА</p><h2 id="subscriptionTitle">Оформление Premium</h2></div></div>
+      <p id="subscriptionDescription" class="subscription-copy">Приложение откроет отдельную страницу оплаты и автоматически проверит результат.</p>
       <div class="subscription-order-row"><div><span>${escapeHtml(plan.name)}</span><small>Ежемесячная подписка</small></div><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))}</strong></div>
-      <div class="subscription-payment-placeholder"><div class="subscription-card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 10h18M7 15h3"/></svg></div><div><strong>Банковская карта</strong><small>Появится после подключения платёжного провайдера</small></div><span>Скоро</span></div>
-      <div class="subscription-demo-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg><span>Нажатие ниже создаст только демо-предпросмотр и не изменит вашу подписку.</span></div>
-      <button class="subscription-primary is-wide" data-subscription-confirm type="button">Подтвердить демо-заказ</button>
+      <div class="subscription-payment-placeholder"><div class="subscription-card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 10h18M7 15h3"/></svg></div><div><strong>Тестовая банковская карта</strong><small>Настоящие реквизиты не требуются</small></div><span>Демо</span></div>
+      <div class="subscription-demo-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg><span>Это тестовый сценарий: денег не списывается, но Premium действительно сохранится в вашем аккаунте.</span></div>
+      <button class="subscription-primary is-wide" data-subscription-confirm type="button">Перейти к оплате</button>
     `;
     bindClose();
     overlay.querySelector("[data-subscription-back]")?.addEventListener("click", () => renderOffer(plan));
     overlay.querySelector<HTMLButtonElement>("[data-subscription-confirm]")?.addEventListener("click", async (event) => {
       const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
-      button.textContent = "Готовим макет…";
+      button.textContent = "Открываем оплату…";
       try {
-        const preview = await createCheckoutPreview(plan.id);
-        if (preview.activationPerformed) throw new Error("Preview unexpectedly activated subscription");
-        renderCompletedPreview(preview.plan);
+        const checkout = await createMockCheckout(plan.id);
+        await openCheckoutPage(checkout.checkoutUrl);
+        renderWaitingForPayment(checkout.plan, checkout);
+        void pollForPayment(checkout.plan, checkout);
       } catch {
         button.disabled = false;
-        button.textContent = "Повторить демо-заказ";
-        showTrackNotice("Не удалось подготовить макет покупки");
+        button.textContent = "Повторить открытие оплаты";
+        showTrackNotice("Не удалось открыть страницу оплаты");
       }
     });
     focusFirst();
@@ -2762,12 +2844,12 @@ function showPremiumSubscriptionModal(source: SubscriptionModalSource = "equaliz
       ${closeIcon}
       <div class="subscription-hero">
         <div>${premiumMark}<p class="subscription-kicker">${escapeHtml(sourceCopy.toUpperCase())}</p><h2 id="subscriptionTitle">Настройте музыку под себя</h2><p id="subscriptionDescription" class="subscription-copy">Premium открывает профессиональный эквалайзер и точный контроль звучания.</p></div>
-        <div class="subscription-price"><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))}</strong><span>в месяц</span><small>Цена в макете</small></div>
+        <div class="subscription-price"><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))}</strong><span>в месяц</span><small>Тестовый тариф</small></div>
       </div>
       <div class="subscription-feature-list">${plan.features.map((feature) => `<div>${featureIcon}<span>${escapeHtml(feature)}</span></div>`).join("")}</div>
-      <div class="subscription-plan-note"><span>Premium</span><small>Оплата пока не подключена — можно безопасно посмотреть весь сценарий.</small></div>
-      <button class="subscription-primary is-wide" data-subscription-checkout type="button">Посмотреть макет покупки</button>
-      <p class="subscription-legal">Никаких реальных платёжных данных и списаний на этом этапе.</p>
+      <div class="subscription-plan-note"><span>Premium</span><small>Тестовая оплата выдаст подписку аккаунту сразу после открытия страницы.</small></div>
+      <button class="subscription-primary is-wide" data-subscription-checkout type="button">Оформить Premium</button>
+      <p class="subscription-legal">Тестовый режим · реального списания денег нет.</p>
     `;
     bindClose();
     overlay.querySelector("[data-subscription-checkout]")?.addEventListener("click", () => renderCheckout(plan));

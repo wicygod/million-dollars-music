@@ -4,6 +4,13 @@
   "description": "Capability for the main window",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "http://5.181.21.13:8000/api/subscriptions/mock-payment*" },
+        { "url": "http://127.0.0.1:8000/api/subscriptions/mock-payment*" }
+      ]
+    }
   ]
 }

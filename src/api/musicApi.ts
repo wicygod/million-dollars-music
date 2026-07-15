@@ -61,7 +61,7 @@ export interface SubscriptionPlan {
   billingPeriod: "month";
   features: string[];
   purchaseAvailable: boolean;
-  checkoutMode: "preview";
+  checkoutMode: "preview" | "mock";
 }
 
 export interface SubscriptionStatus {
@@ -78,6 +78,14 @@ export interface CheckoutPreview {
   plan: SubscriptionPlan;
   activationPerformed: boolean;
   message: string;
+}
+
+export interface MockCheckout {
+  id: string;
+  status: "pending";
+  plan: SubscriptionPlan;
+  checkoutUrl: string;
+  expiresInSeconds: number;
 }
 
 export interface AuthResponse {
@@ -477,7 +485,7 @@ type WireSubscriptionPlan = {
   billing_period: "month";
   features: string[];
   purchase_available: boolean;
-  checkout_mode: "preview";
+  checkout_mode: "preview" | "mock";
 };
 
 function mapSubscriptionPlan(plan: WireSubscriptionPlan): SubscriptionPlan {
@@ -530,6 +538,23 @@ export async function createCheckoutPreview(planId: string): Promise<CheckoutPre
     plan: mapSubscriptionPlan(preview.plan),
     activationPerformed: preview.activation_performed,
     message: preview.message,
+  };
+}
+
+export async function createMockCheckout(planId: string): Promise<MockCheckout> {
+  const checkout = await apiSend<{
+    id: string;
+    status: "pending";
+    plan: WireSubscriptionPlan;
+    checkout_url: string;
+    expires_in_seconds: number;
+  }>("/api/subscriptions/checkout", { plan_id: planId });
+  return {
+    id: checkout.id,
+    status: checkout.status,
+    plan: mapSubscriptionPlan(checkout.plan),
+    checkoutUrl: checkout.checkout_url,
+    expiresInSeconds: checkout.expires_in_seconds,
   };
 }
 

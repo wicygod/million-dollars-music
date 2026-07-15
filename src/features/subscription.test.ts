@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatSubscriptionPrice, hasPremiumAccess } from "./subscription";
+import { formatSubscriptionPrice, hasPremiumAccess, isTrustedCheckoutUrl } from "./subscription";
 
 
 describe("subscription entitlements", () => {
@@ -22,5 +22,12 @@ describe("subscription entitlements", () => {
 
   it("formats prices stored in minor currency units", () => {
     expect(formatSubscriptionPrice(19_900, "RUB")).toContain("199");
+  });
+
+  it("only accepts the signed checkout path on the configured API origin", () => {
+    const base = "http://5.181.21.13:8000";
+    expect(isTrustedCheckoutUrl(`${base}/api/subscriptions/mock-payment?checkout_token=signed`, base)).toBe(true);
+    expect(isTrustedCheckoutUrl("https://evil.example/api/subscriptions/mock-payment?checkout_token=signed", base)).toBe(false);
+    expect(isTrustedCheckoutUrl(`${base}/api/subscriptions/mock-payment?checkout_token=signed&next=https://evil.example`, base)).toBe(false);
   });
 });

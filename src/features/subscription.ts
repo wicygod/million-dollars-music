@@ -23,3 +23,20 @@ export function formatSubscriptionPrice(priceMinor: number, currency: string): s
     return `${Math.round(safePrice / 100)} ${currency}`;
   }
 }
+
+export function isTrustedCheckoutUrl(checkoutUrl: string, apiBaseUrl: string): boolean {
+  try {
+    const checkout = new URL(checkoutUrl);
+    const apiBase = new URL(apiBaseUrl);
+    const keys = [...checkout.searchParams.keys()];
+    return (checkout.protocol === "http:" || checkout.protocol === "https:")
+      && checkout.origin === apiBase.origin
+      && checkout.pathname === "/api/subscriptions/mock-payment"
+      && keys.length === 1
+      && keys[0] === "checkout_token"
+      && Boolean(checkout.searchParams.get("checkout_token"))
+      && checkout.hash === "";
+  } catch {
+    return false;
+  }
+}
