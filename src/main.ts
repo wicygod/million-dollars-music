@@ -2734,18 +2734,15 @@ function showPremiumSubscriptionModal(source: SubscriptionModalSource = "equaliz
       ${closeIcon}
       <div class="subscription-state-icon is-success" aria-hidden="true">${featureIcon}</div>
       <p class="subscription-kicker">ОПЛАТА ПОДТВЕРЖДЕНА</p>
-      <h2 id="subscriptionTitle">Premium подключён</h2>
-      <p id="subscriptionDescription" class="subscription-copy">Подписка уже сохранена в аккаунте. Эквалайзер и все звуковые профили доступны прямо сейчас.</p>
+      <h2 id="subscriptionTitle">Премиум подписка оформлена</h2>
+      <p id="subscriptionDescription" class="subscription-copy">Подписка сохранена в аккаунте. Все текущие и будущие Premium-возможности уже доступны.</p>
       <div class="subscription-preview-summary"><span>${escapeHtml(plan.name)}</span><strong>${escapeHtml(formatSubscriptionPrice(plan.priceMinor, plan.currency))} / месяц</strong></div>
-      <button class="subscription-primary is-wide" data-open-paid-equalizer type="button">Открыть эквалайзер</button>
+      <button class="subscription-primary is-wide" data-subscription-continue type="button">Продолжить</button>
     `;
     bindClose();
-    overlay.querySelector("[data-open-paid-equalizer]")?.addEventListener("click", () => {
-      close();
-      showEqualizerModal();
-    });
+    overlay.querySelector("[data-subscription-continue]")?.addEventListener("click", close);
     if (currentPage === "profile" || currentPage === "settings") switchPage(currentPage, currentPageParam);
-    showTrackNotice("Premium успешно подключён");
+    showTrackNotice("Премиум подписка оформлена");
     focusFirst();
   };
 
