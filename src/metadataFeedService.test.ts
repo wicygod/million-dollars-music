@@ -123,7 +123,13 @@ describe("cached metadata playback", () => {
 
   it("keeps optional personalized collections linked to normalized cached tracks", () => {
     const feed = cachedFeed(cachedTrack);
-    feed.personalized = [{ ...cachedTrack, recommendationType: "selected_artist" }];
+    feed.personalized = [{
+      ...cachedTrack,
+      recommendationType: "selected_artist",
+      recommendationReason: "Chosen during onboarding",
+      algorithmVersion: "personalized-v2",
+      recommendationPosition: 3,
+    }];
     const values = installCachedFeed(cachedTrack, 42);
     values.set(getHomeFeedCacheKey(42), JSON.stringify(feed));
 
@@ -131,6 +137,12 @@ describe("cached metadata playback", () => {
 
     expect(restored.personalized?.[0]).toBe(restored.all[0]);
     expect(restored.personalized?.[0].providerState).toBe("cache");
+    expect(restored.personalized?.[0]).toMatchObject({
+      recommendationType: "selected_artist",
+      recommendationReason: "Chosen during onboarding",
+      algorithmVersion: "personalized-v2",
+      recommendationPosition: 3,
+    });
   });
 
   it("invalidates only the requested account cache", () => {

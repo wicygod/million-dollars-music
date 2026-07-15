@@ -1,18 +1,16 @@
 import { API_BASE_URL, adminHeaders, getAdminApiKey, setAdminSessionKey } from "./api/musicApi";
 import { disableNativeContextMenu } from "./contextMenu";
+import {
+  formatChartPercent,
+  selectAdminChartTracks,
+  type AdminChartTrack,
+  type AdminTrackReference,
+} from "./features/popularChart";
 
 disableNativeContextMenu();
 
-interface AdminTrack {
-  id: number;
-  title: string;
-  artists?: Array<{ name: string }>;
-}
-
-interface TopTrack {
-  track: AdminTrack;
-  play_count: number;
-}
+type AdminTrack = AdminTrackReference;
+type TopTrack = AdminChartTrack;
 
 interface AdminStats {
   host: string;
@@ -20,6 +18,7 @@ interface AdminStats {
   cpu_percent: number;
   memory: { percent: number; used: number; total: number };
   top_tracks: TopTrack[];
+  chart_tracks?: TopTrack[];
   total_users: number;
   active_sessions_24h: number;
   total_plays: number;
@@ -123,6 +122,7 @@ const statusDot = document.querySelector<HTMLElement>(".status-dot")!;
 const logsList = document.getElementById("logsList")!;
 const logCount = document.getElementById("logCount")!;
 const topTracks = document.getElementById("topTracks")!;
+const topTracksMeta = document.getElementById("topTracksMeta")!;
 const usersTable = document.getElementById("usersTable")!;
 const userDetail = document.getElementById("userDetail")!;
 const toast = document.getElementById("toast")!;
@@ -376,7 +376,7 @@ function renderStats(stats: AdminStats): void {
   cpuHistory.push(stats.cpu_percent);
   while (cpuHistory.length > 32) cpuHistory.shift();
   renderSparkline();
-  renderTopTracks(stats.top_tracks || []);
+  renderTopTracks(selectAdminChartTracks(stats.chart_tracks, stats.top_tracks));
   lastSync.textContent = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
@@ -443,19 +443,40 @@ function renderOverview(payload: AdminOverview): void {
 }
 
 function renderTopTracks(items: TopTrack[]): void {
-  const rows = items.slice(0, 10).map((item) => {
+  const chartVersion = items.find((item) => item.algorithm_version)?.algorithm_version;
+  topTracksMeta.textContent = chartVersion ? `${chartVersion} · Топ-10` : "Топ-10 по прослушиваниям";
+  const rows = items.slice(0, 10).map((item, index) => {
     const artist = item.track.artists?.map((entry) => entry.name).filter(Boolean).join(", ") || "Неизвестный артист";
+    const position = Math.max(1, Number(item.position) || index + 1);
+    const score = Number.isFinite(item.score) ? Math.max(0, Number(item.score)) : null;
+    const completion = formatChartPercent(item.completion_rate);
+    const skip = formatChartPercent(item.skip_rate);
+    const metrics = [
+      item.unique_listeners !== undefined ? ["Слушатели", formatCount(item.unique_listeners)] : null,
+      ["Зачтено", formatCount(item.play_count)],
+      item.repeat_plays !== undefined ? ["Повторы", formatCount(item.repeat_plays)] : null,
+      item.artist_followers !== undefined ? [item.artist_verified ? "Подписчики ✓" : "Подписчики", formatCount(item.artist_followers)] : null,
+      completion ? ["Дослушали", completion] : null,
+      skip ? ["Пропуски", skip] : null,
+    ].filter((metric): metric is string[] => Boolean(metric));
     return `
-      <button class="track-row" type="button" data-track="${item.track.id}">
-        <div>
+      <article class="track-row chart-track-row" role="listitem" aria-label="${escapeHtml(`${position} место: ${item.track.title || "Без названия"}, ${artist}`)}">
+        <div class="chart-position" aria-hidden="true">${position}</div>
+        <div class="chart-track-copy">
           <div class="track-title">${escapeHtml(item.track.title || "Без названия")}</div>
           <div class="track-artist">${escapeHtml(artist)}</div>
+          <div class="chart-metrics">
+            ${metrics.map(([label, value]) => `<span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(label)}</small></span>`).join("")}
+          </div>
         </div>
-        <div class="play-count">${item.play_count}</div>
-      </button>
+        <div class="chart-score"${score === null ? " data-legacy=\"true\"" : ""}>
+          <strong>${score === null ? formatCount(item.play_count) : score.toFixed(1)}</strong>
+          <small>${score === null ? "прослуш." : "оценка"}</small>
+        </div>
+      </article>
     `;
   });
-  topTracks.innerHTML = rows.length ? rows.join("") : `<p class="muted">Прослушиваний пока нет.</p>`;
+  topTracks.innerHTML = rows.length ? rows.join("") : `<p class="muted">Подходящих треков для чарта пока нет.</p>`;
 }
 
 function renderLogs(events: LogEvent[]): void {

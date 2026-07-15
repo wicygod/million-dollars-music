@@ -170,6 +170,33 @@ describe("personalization API contracts", () => {
     expect(feed.trending).toEqual([]);
   });
 
+  it("preserves recommendation metadata when the same track is also recent", () => {
+    const baseTrack = {
+      id: 9,
+      title: "Shared track",
+      artist: "Artist",
+      source_url: "https://example.com/shared-track",
+    };
+    const feed = mapBackendFeed({
+      recent: [baseTrack],
+      personalized: [{
+        track: baseTrack,
+        recommendation_type: "similar",
+        reason: "Evidence-based match",
+        algorithm_version: "personalized-v2",
+      }],
+      personalization_active: true,
+    });
+
+    expect(feed.all[0]).toMatchObject({
+      id: "9",
+      recommendationType: "similar",
+      recommendationReason: "Evidence-based match",
+      algorithmVersion: "personalized-v2",
+      recommendationPosition: 0,
+    });
+  });
+
   it("allows only safe account image URL forms", () => {
     expect(resolveBackendImageUrl("/static/avatar.webp")).toBe("http://5.181.21.13:8000/static/avatar.webp");
     expect(resolveBackendImageUrl("https://cdn.example/avatar.jpg")).toBe("https://cdn.example/avatar.jpg");

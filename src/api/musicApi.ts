@@ -743,12 +743,29 @@ function resolveBackendUrl(value: string | null | undefined): string | null {
 }
 
 function uniqueTracks(items: Track[]): Track[] {
-  const seen = new Set<string>();
-  return items.filter((track) => {
-    if (seen.has(track.id)) return false;
-    seen.add(track.id);
-    return true;
+  const unique: Track[] = [];
+  const positions = new Map<string, number>();
+  items.forEach((track) => {
+    const existingPosition = positions.get(track.id);
+    if (existingPosition === undefined) {
+      positions.set(track.id, unique.length);
+      unique.push(track);
+      return;
+    }
+    const existing = unique[existingPosition];
+    // A track can be both recent and recommended. Preserve the richer
+    // recommendation payload instead of letting the first collection erase it.
+    unique[existingPosition] = {
+      ...existing,
+      ...track,
+      liked: existing.liked || track.liked,
+      recommendationType: track.recommendationType || existing.recommendationType,
+      recommendationReason: track.recommendationReason || existing.recommendationReason,
+      algorithmVersion: track.algorithmVersion || existing.algorithmVersion,
+      recommendationPosition: track.recommendationPosition ?? existing.recommendationPosition,
+    };
   });
+  return unique;
 }
 
 export function mapBackendTrack(track: BackendTrack, providerState: MetadataProviderState = "backend"): Track {

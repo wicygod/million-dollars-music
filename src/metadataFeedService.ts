@@ -86,7 +86,7 @@ interface TrackSeed {
 
 export type FeedCacheScope = string | number | null;
 
-export const HOME_FEED_CACHE_PREFIX = "mm_metadata_feed_cache_v5";
+export const HOME_FEED_CACHE_PREFIX = "mm_metadata_feed_cache_v6";
 export const HOME_FEED_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUTH_USER_STORAGE_KEY = "mm_auth_user";
 
@@ -615,7 +615,20 @@ function readCachedFeed(allowStale: boolean, scope?: FeedCacheScope): MetadataFe
     const normalizedById = new Map(normalized.map((track) => [track.id, track]));
     const normalizeCollection = (items: Track[] | undefined, fallback: Track[]): Track[] => (
       items?.length
-        ? items.map((track) => normalizedById.get(String(track.id)) || normalizeCachedTrack(track, source))
+        ? items.map((track) => {
+          const normalizedTrack = normalizeCachedTrack(track, source);
+          const shared = normalizedById.get(normalizedTrack.id);
+          if (!shared) return normalizedTrack;
+          Object.assign(shared, {
+            ...normalizedTrack,
+            liked: shared.liked || normalizedTrack.liked,
+            recommendationType: normalizedTrack.recommendationType || shared.recommendationType,
+            recommendationReason: normalizedTrack.recommendationReason || shared.recommendationReason,
+            algorithmVersion: normalizedTrack.algorithmVersion || shared.algorithmVersion,
+            recommendationPosition: normalizedTrack.recommendationPosition ?? shared.recommendationPosition,
+          });
+          return shared;
+        })
         : fallback
     );
     return {

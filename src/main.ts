@@ -1,5 +1,5 @@
 ﻿import { LEGACY_TRACK_ID_MAP, getInitialMetadataFeed, loadHomeFeed, type MetadataFeed, type Track } from "./metadataFeedService";
-import { EqualizerEngine, DEFAULT_EQUALIZER, EQ_FREQUENCIES, EQ_PRESETS, equalizerCurvePoints, formatEqFrequency, formatEqGain, type EqualizerPreset, type EqualizerPresetId, type EqualizerState } from "./features/equalizer";
+import { EqualizerEngine, DEFAULT_EQUALIZER, EQUALIZER_STATE_VERSION, EQ_FREQUENCIES, EQ_PRESETS, calculateEqualizerMetrics, equalizerCurvePoints, equalizerDisplayGains, formatEqFrequency, formatEqGain, restoreEqualizerState, type EqualizerPreset, type EqualizerPresetId, type EqualizerState } from "./features/equalizer";
 import { invalidateHomeFeedCache } from "./metadataFeedService";
 import { applyHistorySummaryToProfile, pluralizeTracks } from "./features/profile";
 import { filterLocalSearchTracks, highlightMatch } from "./features/search";
@@ -18,6 +18,7 @@ import {
   type ArtistOnboardingState,
 } from "./features/artistOnboarding";
 import { PlaybackSessionTracker, type PlaybackEndReason, type PlaybackSessionEvent } from "./features/playbackSession";
+import { selectPopularTracks } from "./features/popularChart";
 import { loadHlsConstructor, type HlsPlayer } from "./player/hlsLoader";
 import { disableNativeContextMenu } from "./contextMenu";
 import {
@@ -227,6 +228,13 @@ function metadataTrackCollections(): Track[][] {
     metadataFeed.ru,
     metadataFeed.global,
     metadataFeed.all,
+    metadataFeed.personalized || [],
+    metadataFeed.selectedArtists || [],
+    metadataFeed.similarArtists || [],
+    metadataFeed.genreRecommendations || [],
+    metadataFeed.popularForYou || [],
+    metadataFeed.exploration || [],
+    ...(metadataFeed.sections || []).map((section) => section.tracks),
   ];
 }
 
@@ -901,7 +909,6 @@ function applyMetadataFeed(feed: MetadataFeed) {
   const currentId = player.currentTrackId;
   const previousCurrentTrack = getTrack(currentId);
   const likedIds = new Set(tracks.filter((track) => track.liked).map((track) => track.id));
-  popularVisibleCount = POPULAR_INITIAL_RENDER;
   metadataFeed = { ...feed, errorMessage: feed.errorMessage || undefined };
   tracks = feed.all.map((track) => ({ ...track, liked: likedIds.has(track.id) }));
   if (previousCurrentTrack && !tracks.some((track) => track.id === previousCurrentTrack.id)) {
@@ -932,11 +939,20 @@ function refreshMetadataFeed(attempt = 1, generation = metadataFeedGeneration) {
   loadHomeFeed()
     .then((feed) => {
       if (generation !== metadataFeedGeneration) return;
-      const signature = (items: Track[]) => items.map((track) => `${track.id}:${track.title}:${track.artist}`).join("|");
+      const signature = (items: Track[]) => items.map((track) => [
+        track.id,
+        track.title,
+        track.artist,
+        track.recommendationType || "",
+        track.recommendationReason || "",
+        track.algorithmVersion || "",
+        track.recommendationPosition ?? "",
+      ].join(":")).join("|");
       const currentSignature = [
         signature(tracks),
         signature(metadataFeed.recent),
         signature(metadataFeed.personalized || []),
+        signature(metadataFeed.top),
         signature(metadataFeed.trending),
         signature(metadataFeed.ru),
         signature(metadataFeed.global),
@@ -945,14 +961,16 @@ function refreshMetadataFeed(attempt = 1, generation = metadataFeedGeneration) {
         signature(feed.all),
         signature(feed.recent),
         signature(feed.personalized || []),
+        signature(feed.top),
         signature(feed.trending),
         signature(feed.ru),
         signature(feed.global),
       ].join("::");
-      if (feed.source !== metadataFeed.source || feed.errorMessage !== metadataFeed.errorMessage || feed.personalizationActive !== metadataFeed.personalizationActive || currentSignature !== nextSignature) {
+      if (feed.source !== metadataFeed.source || feed.errorMessage !== metadataFeed.errorMessage || feed.personalizationActive !== metadataFeed.personalizationActive || feed.algorithmVersion !== metadataFeed.algorithmVersion || currentSignature !== nextSignature) {
         applyMetadataFeed(feed);
       }
-      schedulePopularTrackWarmup(feed.trending.length ? feed.trending : feed.all);
+      const nextPopular = selectPopularTracks(feed);
+      schedulePopularTrackWarmup(nextPopular.length ? nextPopular : feed.all);
       if (feed.errorMessage && attempt < 8) {
         window.setTimeout(() => refreshMetadataFeed(attempt + 1, generation), 1500 * attempt);
       }
@@ -1595,7 +1613,7 @@ function renderHomeTrackRail(title: string, items: Track[], showRecommendationRe
             ? t.recommendationReason
             : t.artist;
           return `
-            <div class="home-compact-card group cursor-pointer" data-id="${t.id}"${showRecommendationReason ? ` data-recommendation-position="${index}"` : ""}>
+            <div class="home-compact-card group cursor-pointer" data-id="${t.id}"${showRecommendationReason ? ` data-track-queue="personalized" data-recommendation-position="${index}"` : ""} aria-label="${escapeHtml(`${t.title}. ${secondaryText}`)}">
               ${renderCover(t, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}
               <div class="min-w-0 flex-1">
                 <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
@@ -1623,7 +1641,7 @@ function recordRecommendationImpression(track: Track, position: number) {
     position,
     recommendationType: track.recommendationType,
     reason: track.recommendationReason || null,
-    algorithmVersion: track.algorithmVersion || metadataFeed.algorithmVersion || "personalized-v1",
+    algorithmVersion: track.algorithmVersion || metadataFeed.algorithmVersion || "personalized-v2",
     context: "home",
   }).catch(() => undefined);
 }
@@ -1661,7 +1679,7 @@ function renderHome(container: HTMLElement) {
   const personalized = (metadataFeed.personalized || []).slice(0, 24);
   const ru = metadataFeed.ru.slice(0, 12);
   const global = metadataFeed.global.slice(0, 12);
-  const popular = metadataFeed.trending;
+  const popular = selectPopularTracks(metadataFeed);
   popularVisibleCount = Math.max(POPULAR_INITIAL_RENDER, Math.min(popularVisibleCount, popular.length || POPULAR_INITIAL_RENDER));
   const visiblePopular = popular.slice(0, popularVisibleCount);
   const status = metadataFeed.errorMessage ? `<div class="backend-status mb-5">${escapeHtml(metadataFeed.errorMessage)}</div>` : "";
@@ -1714,14 +1732,17 @@ function renderHome(container: HTMLElement) {
         <div class="recent-scrollbar mt-2"><div class="recent-scrollbar-thumb" style="width:20%"></div></div>
       </div>
     </section>
-    <section class="mb-8">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-base font-semibold tracking-wide">Популярные треки</h2>
-        <span class="text-xs text-white/35">${visiblePopular.length} / ${popular.length}</span>
+    <section class="mb-8" aria-labelledby="popularTracksTitle" aria-describedby="popularTracksDescription">
+      <div class="flex items-end justify-between gap-4 mb-4">
+        <div class="min-w-0">
+          <h2 id="popularTracksTitle" class="text-base font-semibold tracking-wide">Популярные треки</h2>
+          <p id="popularTracksDescription" class="mt-1 text-xs text-white/45">Чарт на основе популярности артистов и реальных прослушиваний</p>
+        </div>
+        <span class="shrink-0 text-xs text-white/45 tabular-nums" aria-label="Показано ${visiblePopular.length} из ${popular.length} треков">${visiblePopular.length} / ${popular.length}</span>
       </div>
-      <div class="random-grid" aria-label="${popular.length} popular tracks">
+      <div class="random-grid" aria-label="Рейтинг популярных треков: ${popular.length}">
         ${visiblePopular.map((t, index) => `
-          <div class="random-card group cursor-pointer border border-white/10 active:scale-[0.98]" data-id="${t.id}" data-track-queue="popular">
+          <div class="random-card group cursor-pointer border border-white/10 active:scale-[0.98]" data-id="${t.id}" data-track-queue="popular" aria-label="${escapeHtml(`${index + 1} место. ${t.title}, ${t.artist}`)}">
             ${renderCover(t, "w-14 h-14 rounded-xl shrink-0 flex items-center justify-center text-2xl")}
             <span class="popular-rank${index < 3 ? " is-top" : ""}" aria-hidden="true">${index + 1}</span>
             <div class="min-w-0 flex-1"><p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p><p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p></div>
@@ -1734,7 +1755,7 @@ function renderHome(container: HTMLElement) {
             <span>Показать ещё</span>
             <small>${Math.min(POPULAR_RENDER_STEP, popular.length - visiblePopular.length)} треков</small>
           </button>
-        ` : ""}
+        ` : popular.length ? "" : `<p class="col-span-full rounded-xl border border-white/10 px-4 py-5 text-sm text-white/55" role="status">Популярные треки пока недоступны. Обновим чарт автоматически.</p>`}
       </div>
     </section>
     <div class="home-extra-sections">
@@ -1747,7 +1768,13 @@ function renderHome(container: HTMLElement) {
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("button")) return;
       const id = getElementTrackId(el);
-      if (id) activateTrack(el.dataset.trackQueue === "popular" ? popular : tracks, id);
+      if (!id) return;
+      const queue = el.dataset.trackQueue === "popular"
+        ? popular
+        : el.dataset.trackQueue === "personalized"
+          ? personalized
+          : tracks;
+      activateTrack(queue, id);
     });
   });
   wireCardTrackActions(container);
@@ -1763,7 +1790,13 @@ function renderHome(container: HTMLElement) {
 
   container.querySelector(".seeAllHome")?.addEventListener("click", () => switchPage("explore"));
   container.querySelector("#homeHeroPlay")?.addEventListener("click", () => {
-    if (heroTrack) activateTrack(popular.length ? popular : tracks, heroTrack.id);
+    if (!heroTrack) return;
+    const heroQueue = personalized.some((track) => track.id === heroTrack.id)
+      ? personalized
+      : popular.length
+        ? popular
+        : tracks;
+    activateTrack(heroQueue, heroTrack.id);
   });
   container.querySelector("#homeHeroExplore")?.addEventListener("click", () => switchPage("explore"));
   setupPopularLoadMore(container, popular.length);
@@ -2557,41 +2590,51 @@ function showEqualizerModal() {
   const presetEntries = (Object.entries(EQ_PRESETS) as [EqualizerPresetId, EqualizerPreset][]).filter(([id]) => id !== "custom");
   const activePreset = EQ_PRESETS[equalizerState.preset];
   overlay.innerHTML = `
-    <section class="equalizer-modal" role="dialog" aria-modal="true" aria-labelledby="equalizerTitle">
+    <section class="equalizer-modal" role="dialog" aria-modal="true" aria-labelledby="equalizerTitle" aria-describedby="equalizerDescription">
       <div class="equalizer-head">
-        <div><div class="equalizer-kicker">MILLION AUDIO ENGINE</div><div id="equalizerTitle" class="equalizer-title">Эквалайзер</div><div class="equalizer-subtitle">10-полосная коррекция звука в реальном времени</div></div>
+        <div><div class="equalizer-kicker">MILLION AUDIO ENGINE V2</div><div id="equalizerTitle" class="equalizer-title">Эквалайзер</div><div id="equalizerDescription" class="equalizer-subtitle">Чистая 10-полосная коррекция, усиление низких и защита от перегрузки</div></div>
         <button class="equalizer-close" type="button" aria-label="Закрыть">×</button>
       </div>
 
       <div class="equalizer-visual">
-        <div class="equalizer-current-preset"><span data-eq-current-icon>${activePreset.icon}</span><div><strong data-eq-current-title>${activePreset.label}</strong><small data-eq-current-description>${activePreset.description}</small></div></div>
+        <div class="equalizer-current-preset"><span data-eq-current-icon aria-hidden="true">${activePreset.icon}</span><div><small>Сейчас звучит</small><strong data-eq-current-title>${activePreset.label}</strong><span data-eq-current-description>${activePreset.description}</span></div></div>
         <div class="equalizer-curve-wrap" aria-hidden="true">
           <svg class="equalizer-curve" viewBox="0 0 100 100" preserveAspectRatio="none">
             <defs><linearGradient id="eqCurveGradient" x1="0" x2="1"><stop stop-color="#8b5cf6"/><stop offset=".52" stop-color="#a78bfa"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs>
             <path class="equalizer-curve-grid" d="M0 12H100 M0 50H100 M0 88H100"/>
-            <polyline data-eq-curve points="${equalizerCurvePoints(equalizerState.gains)}"/>
+            <polyline data-eq-curve points="${equalizerCurvePoints(equalizerDisplayGains(equalizerState))}"/>
           </svg>
           <span class="equalizer-curve-high">+12</span><span class="equalizer-curve-zero">0</span><span class="equalizer-curve-low">−12</span>
         </div>
       </div>
 
       <div class="equalizer-toolbar">
-        <div class="equalizer-status"><button class="equalizer-power ${equalizerState.enabled ? "is-on" : ""}" type="button" role="switch" aria-label="Включить или выключить эквалайзер" aria-checked="${equalizerState.enabled}"></button><div><strong>${equalizerState.enabled ? "Эквалайзер включён" : "Эквалайзер выключен"}</strong><small>Мгновенное A/B сравнение</small></div></div>
-        <label class="equalizer-preamp"><span>Предусилитель <output data-eq-preamp-output>${formatEqGain(equalizerState.preamp)}</output></span><input data-eq-preamp type="range" min="-12" max="3" step="0.5" value="${equalizerState.preamp}" /></label>
+        <div class="equalizer-status"><button class="equalizer-power ${equalizerState.enabled ? "is-on" : ""}" type="button" role="switch" aria-label="Включить или выключить эквалайзер" aria-checked="${equalizerState.enabled}"><span aria-hidden="true"></span></button><div><strong>${equalizerState.enabled ? "Эквалайзер включён" : "Эквалайзер выключен"}</strong><small>Нажмите для мгновенного A/B сравнения</small></div></div>
+        <label class="equalizer-preamp"><span>Входной уровень <output data-eq-preamp-output>${formatEqGain(equalizerState.preamp)}</output></span><input data-eq-preamp type="range" min="-12" max="0" step="0.5" value="${equalizerState.preamp}" aria-label="Входной уровень эквалайзера"/><small data-eq-effective-level>Автозапас рассчитывается по пиковому усилению</small></label>
         <button class="equalizer-reset" type="button">Сбросить</button>
       </div>
 
-      <div class="equalizer-section-label"><span>Готовые профили</span><small>Выберите характер звучания</small></div>
-      <div class="equalizer-presets">${presetEntries.map(([id, preset]) => `<button class="equalizer-preset ${equalizerState.preset === id ? "is-active" : ""}" type="button" data-eq-preset="${id}"><span>${preset.icon}</span><div><strong>${preset.label}</strong><small>${preset.description}</small></div></button>`).join("")}</div>
+      <div class="equalizer-section-label"><span>Характер звука</span><small>Макроконтролы работают поверх десяти полос</small></div>
+      <div class="equalizer-enhancers">
+        <label class="equalizer-enhancer equalizer-enhancer-bass"><span><strong>Сила баса</strong><small>Глубина и физический удар без лишнего гула</small></span><output data-eq-bass-output>0%</output><input data-eq-bass type="range" min="0" max="100" step="1" value="${equalizerState.bassBoost}" aria-label="Сила баса"/></label>
+        <label class="equalizer-enhancer equalizer-enhancer-clarity"><span><strong>Чистота</strong><small>Убирает муть и подчёркивает детали</small></span><output data-eq-clarity-output>0%</output><input data-eq-clarity type="range" min="0" max="100" step="1" value="${equalizerState.clarity}" aria-label="Чистота звука"/></label>
+        <div class="equalizer-headroom"><button class="equalizer-headroom-switch ${equalizerState.autoGain ? "is-on" : ""}" data-eq-auto-gain type="button" role="switch" aria-label="Автоматический запас громкости" aria-checked="${equalizerState.autoGain}"><span aria-hidden="true"></span></button><div><strong>Автозапас</strong><small>Сохраняет панч и не даёт усиленным частотам клипповать</small></div><output data-eq-headroom-output>0 дБ</output></div>
+      </div>
 
-      <div class="equalizer-section-label equalizer-bands-label"><span>Точная настройка</span><small>Двойной клик по полосе возвращает 0 dB</small></div>
+      <div class="equalizer-section-label"><span>Готовые профили</span><small>Выберите характер звучания</small></div>
+      <div class="equalizer-presets">${presetEntries.map(([id, preset]) => `<button class="equalizer-preset ${equalizerState.preset === id ? "is-active" : ""}" type="button" data-eq-preset="${id}" aria-pressed="${equalizerState.preset === id}"><span aria-hidden="true">${preset.icon}</span><div><strong>${preset.label}</strong><small>${preset.description}</small></div><i aria-hidden="true">✓</i></button>`).join("")}</div>
+
+      <div class="equalizer-section-label equalizer-bands-label"><span>Точная настройка</span><small>Двойной щелчок или клавиша 0 возвращает полосу в 0 дБ</small></div>
       <div class="equalizer-bands-shell">
         <div class="equalizer-db-scale"><span>+12</span><span>0</span><span>−12</span></div>
         <div class="equalizer-bands">
-          ${EQ_FREQUENCIES.map((frequency, index) => `<label class="equalizer-band"><output data-eq-output="${index}">${formatEqGain(equalizerState.gains[index])}</output><input type="range" min="-12" max="12" step="0.5" value="${equalizerState.gains[index]}" data-eq-band="${index}" aria-label="${frequency} герц"><span>${formatEqFrequency(frequency)}</span><small>Hz</small></label>`).join("")}
+          ${EQ_FREQUENCIES.map((frequency, index) => {
+            const gain = equalizerState.gains[index];
+            return `<label class="equalizer-band" style="--eq-positive:${Math.max(0, gain) / 12 * 50}%;--eq-negative:${Math.max(0, -gain) / 12 * 50}%"><output data-eq-output="${index}">${formatEqGain(gain)}</output><span class="equalizer-band-control"><span class="equalizer-band-fill is-positive" aria-hidden="true"></span><span class="equalizer-band-fill is-negative" aria-hidden="true"></span><input type="range" min="-12" max="12" step="0.5" value="${gain}" data-eq-band="${index}" aria-label="Полоса ${formatEqFrequency(frequency)}" aria-orientation="vertical" aria-valuetext="${formatEqGain(gain)}"></span><strong>${formatEqFrequency(frequency)}</strong></label>`;
+          }).join("")}
         </div>
       </div>
-      <div class="equalizer-footnote"><span><i></i> Защита от перегрузки активна</span><span>${EQ_FREQUENCIES.length} полос · −12…+12 dB · 32-bit Web Audio</span></div>
+      <div class="equalizer-footnote" aria-live="polite"><span data-eq-safety-status><i></i> Защита от перегрузки активна</span><span>Изменения применяются и сохраняются автоматически · 32-bit Web Audio</span></div>
     </section>`;
   document.body.appendChild(overlay);
   trigger?.setAttribute("aria-expanded", "true");
@@ -2605,14 +2648,32 @@ function showEqualizerModal() {
   const currentDescription = overlay.querySelector<HTMLElement>("[data-eq-current-description]")!;
   const preamp = overlay.querySelector<HTMLInputElement>("[data-eq-preamp]")!;
   const preampOutput = overlay.querySelector<HTMLOutputElement>("[data-eq-preamp-output]")!;
+  const effectiveLevel = overlay.querySelector<HTMLElement>("[data-eq-effective-level]")!;
+  const bass = overlay.querySelector<HTMLInputElement>("[data-eq-bass]")!;
+  const bassOutput = overlay.querySelector<HTMLOutputElement>("[data-eq-bass-output]")!;
+  const clarity = overlay.querySelector<HTMLInputElement>("[data-eq-clarity]")!;
+  const clarityOutput = overlay.querySelector<HTMLOutputElement>("[data-eq-clarity-output]")!;
+  const autoGain = overlay.querySelector<HTMLButtonElement>("[data-eq-auto-gain]")!;
+  const headroomOutput = overlay.querySelector<HTMLOutputElement>("[data-eq-headroom-output]")!;
+  const safetyStatus = overlay.querySelector<HTMLElement>("[data-eq-safety-status]")!;
   const curve = overlay.querySelector<SVGPolylineElement>("[data-eq-curve]")!;
+  let saveTimer: number | null = null;
+  let syncFrame: number | null = null;
+  const persistEqualizer = () => {
+    if (saveTimer !== null) window.clearTimeout(saveTimer);
+    saveTimer = null;
+    saveEqualizerState();
+  };
   const close = () => {
+    persistEqualizer();
+    if (syncFrame !== null) window.cancelAnimationFrame(syncFrame);
     overlay.remove();
     trigger?.setAttribute("aria-expanded", "false");
     trigger?.focus();
   };
   const syncControls = () => {
     const preset = EQ_PRESETS[equalizerState.preset];
+    const metrics = calculateEqualizerMetrics(equalizerState);
     power.classList.toggle("is-on", equalizerState.enabled);
     power.setAttribute("aria-checked", String(equalizerState.enabled));
     statusTitle.textContent = equalizerState.enabled ? "Эквалайзер включён" : "Эквалайзер выключен";
@@ -2621,45 +2682,113 @@ function showEqualizerModal() {
     currentDescription.textContent = preset.description;
     preamp.value = String(equalizerState.preamp);
     preampOutput.value = formatEqGain(equalizerState.preamp);
-    curve.setAttribute("points", equalizerCurvePoints(equalizerState.gains));
-    overlay.querySelectorAll<HTMLElement>("[data-eq-preset]").forEach((button) => button.classList.toggle("is-active", button.dataset.eqPreset === equalizerState.preset));
+    preamp.setAttribute("aria-valuetext", formatEqGain(equalizerState.preamp));
+    effectiveLevel.textContent = equalizerState.autoGain && metrics.automaticHeadroomDb < -0.05
+      ? `Фактический уровень ${formatEqGain(metrics.effectivePreampDb)} с учётом автозапаса`
+      : "Ручной уровень без дополнительного ослабления";
+    bass.value = String(equalizerState.bassBoost);
+    bassOutput.value = `${Math.round(equalizerState.bassBoost)}% · ${formatEqGain(metrics.bassDb)}`;
+    bass.setAttribute("aria-valuetext", bassOutput.value);
+    clarity.value = String(equalizerState.clarity);
+    clarityOutput.value = `${Math.round(equalizerState.clarity)}%`;
+    clarity.setAttribute("aria-valuetext", `${Math.round(equalizerState.clarity)} процентов`);
+    autoGain.classList.toggle("is-on", equalizerState.autoGain);
+    autoGain.setAttribute("aria-checked", String(equalizerState.autoGain));
+    headroomOutput.value = equalizerState.autoGain ? formatEqGain(metrics.automaticHeadroomDb) : "Выкл.";
+    curve.setAttribute("points", equalizerCurvePoints(equalizerDisplayGains(equalizerState)));
+    safetyStatus.classList.toggle("is-off", !equalizerState.enabled);
+    safetyStatus.classList.remove("is-error");
+    safetyStatus.innerHTML = equalizerState.enabled
+      ? `<i></i>${equalizerState.autoGain ? ` Автозапас ${formatEqGain(metrics.automaticHeadroomDb)} · лимитер только страхует пики` : " Лимитер защищает выход · автозапас выключен"}`
+      : "<i></i> Обработка выключена — играет исходный сигнал";
+    overlay.querySelectorAll<HTMLButtonElement>("[data-eq-preset]").forEach((button) => {
+      const active = button.dataset.eqPreset === equalizerState.preset;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
     equalizerState.gains.forEach((gain, index) => {
       const slider = overlay.querySelector<HTMLInputElement>(`[data-eq-band="${index}"]`);
       const output = overlay.querySelector<HTMLOutputElement>(`[data-eq-output="${index}"]`);
-      if (slider) slider.value = String(gain);
+      if (slider) {
+        slider.value = String(gain);
+        slider.setAttribute("aria-valuetext", formatEqGain(gain));
+        const band = slider.closest<HTMLElement>(".equalizer-band");
+        band?.style.setProperty("--eq-positive", `${Math.max(0, gain) / 12 * 50}%`);
+        band?.style.setProperty("--eq-negative", `${Math.max(0, -gain) / 12 * 50}%`);
+      }
       if (output) output.value = formatEqGain(gain);
     });
   };
-  const commitEqualizer = () => {
+  const scheduleSync = () => {
+    if (syncFrame !== null) return;
+    syncFrame = window.requestAnimationFrame(() => {
+      syncFrame = null;
+      if (overlay.isConnected) syncControls();
+    });
+  };
+  const commitEqualizer = (persistImmediately = false) => {
     applyEqualizerGains();
-    saveEqualizerState();
-    syncControls();
+    scheduleSync();
+    if (saveTimer !== null) window.clearTimeout(saveTimer);
+    if (persistImmediately) persistEqualizer();
+    else saveTimer = window.setTimeout(persistEqualizer, 180);
+  };
+  const ensureEqualizerAvailable = async () => {
+    if (await ensureAudioGraph()) return true;
+    statusTitle.textContent = "Обработка недоступна";
+    safetyStatus.classList.add("is-error");
+    safetyStatus.innerHTML = "<i></i> Не удалось подключить аудиодвижок — выберите другой трек и повторите";
+    showTrackNotice("Эквалайзер недоступен для этого аудиопотока");
+    return false;
   };
 
   power.addEventListener("click", async () => {
-    if (!await ensureAudioGraph()) { showTrackNotice("Эквалайзер недоступен для этого аудиопотока"); return; }
-    equalizerState.enabled = !equalizerState.enabled;
-    commitEqualizer();
+    if (equalizerState.enabled) {
+      equalizerState.enabled = false;
+      commitEqualizer(true);
+      return;
+    }
+    if (!await ensureEqualizerAvailable()) return;
+    equalizerState.enabled = true;
+    commitEqualizer(true);
   });
   overlay.querySelectorAll<HTMLButtonElement>("[data-eq-preset]").forEach((button) => {
     button.addEventListener("click", async () => {
       const presetId = button.dataset.eqPreset as EqualizerPresetId;
       const preset = EQ_PRESETS[presetId];
-      if (!preset || !await ensureAudioGraph()) return;
-      equalizerState = { enabled: true, preset: presetId, preamp: preset.preamp, gains: [...preset.gains] };
-      commitEqualizer();
+      if (!preset || !await ensureEqualizerAvailable()) return;
+      equalizerState = { enabled: true, preset: presetId, preamp: preset.preamp, bassBoost: preset.bassBoost, clarity: preset.clarity, autoGain: equalizerState.autoGain, gains: [...preset.gains] };
+      commitEqualizer(true);
     });
   });
   preamp.addEventListener("input", async () => {
-    if (!await ensureAudioGraph()) return;
+    if (!await ensureEqualizerAvailable()) return;
     equalizerState.preamp = Number(preamp.value);
     equalizerState.preset = "custom";
     equalizerState.enabled = true;
     commitEqualizer();
   });
+  bass.addEventListener("input", async () => {
+    if (!await ensureEqualizerAvailable()) return;
+    equalizerState.bassBoost = Number(bass.value);
+    equalizerState.preset = "custom";
+    equalizerState.enabled = true;
+    commitEqualizer();
+  });
+  clarity.addEventListener("input", async () => {
+    if (!await ensureEqualizerAvailable()) return;
+    equalizerState.clarity = Number(clarity.value);
+    equalizerState.preset = "custom";
+    equalizerState.enabled = true;
+    commitEqualizer();
+  });
+  autoGain.addEventListener("click", () => {
+    equalizerState.autoGain = !equalizerState.autoGain;
+    commitEqualizer(true);
+  });
   overlay.querySelectorAll<HTMLInputElement>("[data-eq-band]").forEach((slider) => {
     const updateBand = async (value: number) => {
-      if (!await ensureAudioGraph()) return;
+      if (!await ensureEqualizerAvailable()) return;
       equalizerState.gains[Number(slider.dataset.eqBand)] = value;
       equalizerState.preset = "custom";
       equalizerState.enabled = true;
@@ -2667,11 +2796,16 @@ function showEqualizerModal() {
     };
     slider.addEventListener("input", () => void updateBand(Number(slider.value)));
     slider.addEventListener("dblclick", (event) => { event.preventDefault(); slider.value = "0"; void updateBand(0); });
+    slider.addEventListener("keydown", (event) => {
+      if (event.key !== "0") return;
+      event.preventDefault();
+      slider.value = "0";
+      void updateBand(0);
+    });
   });
-  overlay.querySelector(".equalizer-reset")?.addEventListener("click", async () => {
-    if (!await ensureAudioGraph()) return;
-    equalizerState = { enabled: true, preset: "flat", preamp: 0, gains: [...EQ_PRESETS.flat.gains] };
-    commitEqualizer();
+  overlay.querySelector(".equalizer-reset")?.addEventListener("click", () => {
+    equalizerState = { ...DEFAULT_EQUALIZER, gains: [...DEFAULT_EQUALIZER.gains] };
+    commitEqualizer(true);
   });
   closeButton.addEventListener("click", close);
   overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
@@ -3414,7 +3548,7 @@ function loadSettings() {
 }
 
 function saveEqualizerState() {
-  localStorage.setItem(accountStorageKey(STORAGE_KEY_EQUALIZER), JSON.stringify(equalizerState));
+  localStorage.setItem(accountStorageKey(STORAGE_KEY_EQUALIZER), JSON.stringify({ version: EQUALIZER_STATE_VERSION, ...equalizerState }));
 }
 
 function loadEqualizerState() {
@@ -3422,18 +3556,9 @@ function loadEqualizerState() {
   try {
     const raw = localStorage.getItem(accountStorageKey(STORAGE_KEY_EQUALIZER));
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<EqualizerState>;
-      const presetId: EqualizerPresetId = parsed.preset && parsed.preset in EQ_PRESETS ? parsed.preset : "flat";
-      const preset = EQ_PRESETS[presetId];
-      const gains = Array.isArray(parsed.gains) && parsed.gains.length === EQ_FREQUENCIES.length
-        ? parsed.gains.map((gain) => Math.max(-12, Math.min(12, Number(gain) || 0)))
-        : [...preset.gains];
-      equalizerState = {
-        enabled: Boolean(parsed.enabled),
-        preset: presetId,
-        preamp: Number.isFinite(Number(parsed.preamp)) ? Math.max(-12, Math.min(3, Number(parsed.preamp))) : preset.preamp,
-        gains,
-      };
+      const restored = restoreEqualizerState(JSON.parse(raw));
+      equalizerState = restored.state;
+      if (restored.migrated) saveEqualizerState();
     }
   } catch { /* ignore malformed local state */ }
   applyEqualizerGains();
