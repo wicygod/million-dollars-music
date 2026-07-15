@@ -164,6 +164,12 @@ body.auth-locked #appContent {
   font-size: 12px;
 }
 
+.auth-form small {
+  color: var(--text-subtle);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .auth-form input,
 .profile-inline-form input {
   width: 100%;
@@ -202,6 +208,7 @@ body.auth-locked #appContent {
 .auth-error {
   color: #ffb4b4;
   font-size: 12px;
+  line-height: 1.45;
 }
 
 .profile-avatar-img {

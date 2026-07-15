@@ -9,6 +9,27 @@ const AUTH_USER_STORAGE_KEY = "mm_auth_user";
 const ADMIN_SESSION_KEY = "mm_admin_session_key";
 const API_REQUEST_TIMEOUT_MS = 12000;
 
+export class ApiRequestError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly detail: unknown = null,
+  ) {
+    super(`API request failed: ${status}`);
+    this.name = "ApiRequestError";
+  }
+}
+
+async function responseError(response: Response): Promise<ApiRequestError> {
+  let detail: unknown = null;
+  try {
+    const payload = await response.json() as { detail?: unknown };
+    detail = payload?.detail ?? null;
+  } catch {
+    // Some upstream failures return an empty or non-JSON response.
+  }
+  return new ApiRequestError(response.status, detail);
+}
+
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = API_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
@@ -393,7 +414,7 @@ export async function registerAccount(login: string, nickname: string, password:
     headers: authHeaders(),
     body: JSON.stringify({ login, nickname, password }),
   });
-  if (!response.ok) throw new Error(`Auth failed: ${response.status}`);
+  if (!response.ok) throw await responseError(response);
   return persistAuth(await response.json() as AuthResponse);
 }
 
@@ -403,7 +424,7 @@ export async function loginAccount(login: string, password: string): Promise<Aut
     headers: authHeaders(),
     body: JSON.stringify({ login, password }),
   });
-  if (!response.ok) throw new Error(`Auth failed: ${response.status}`);
+  if (!response.ok) throw await responseError(response);
   return persistAuth(await response.json() as AuthResponse);
 }
 

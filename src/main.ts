@@ -49,12 +49,14 @@ import {
   submitBugReport,
   submitPlaybackEvent,
   setUserFavorite,
+  type AuthResponse,
   type AuthUser,
   type OnboardingArtist,
   updateAvatar,
   updateNickname,
   withAppToken,
 } from "./api/musicApi";
+import { authFailureMessage } from "./features/authFeedback";
 
 disableNativeContextMenu();
 
@@ -1031,15 +1033,16 @@ function ensureAuthOverlay(): HTMLElement {
       <form id="authForm" class="auth-form">
         <label>
           <span>Логин</span>
-          <input id="authLogin" autocomplete="username" minlength="3" maxlength="64" required />
+          <input id="authLogin" autocomplete="username" autocapitalize="none" spellcheck="false" minlength="3" maxlength="64" pattern="[A-Za-z0-9_.-]{3,64}" title="Только латинские буквы, цифры, точка, дефис и подчёркивание" required />
+          <small>Латинские буквы, цифры, точка, дефис или подчёркивание</small>
         </label>
         <label id="authNicknameWrap" class="hidden">
           <span>Имя в приложении</span>
-          <input id="authNickname" autocomplete="nickname" maxlength="96" />
+          <input id="authNickname" autocomplete="nickname" minlength="2" maxlength="96" />
         </label>
         <label>
           <span>Пароль</span>
-          <input id="authPassword" type="password" autocomplete="current-password" minlength="6" required />
+          <input id="authPassword" type="password" autocomplete="current-password" minlength="6" maxlength="128" required />
         </label>
         <p id="authError" class="auth-error hidden" role="alert"></p>
         <button id="authSubmitBtn" type="submit">Войти</button>
@@ -1062,21 +1065,42 @@ function ensureAuthOverlay(): HTMLElement {
       submit.disabled = true;
       submit.textContent = "Подключаемся…";
     }
+    let payload: AuthResponse;
     try {
-      const payload = mode === "register"
+      payload = mode === "register"
         ? await registerAccount(login, nickname || login, password)
         : await loginAccount(login, password);
-      currentAuthUser = payload.user;
-      hydrateAccountState(true);
-      hideAuthScreen();
-      if (mode === "register") {
+    } catch (error) {
+      setAuthError(authFailureMessage(error, mode));
+      if (submit) {
+        submit.disabled = false;
+        submit.textContent = mode === "register" ? "Создать аккаунт" : "Войти";
+      }
+      return;
+    }
+
+    // The server has already created/authenticated the account at this point.
+    // A local player or cache initialization issue must never be presented as
+    // a failed registration, otherwise users retry with an already-used login.
+    currentAuthUser = payload.user;
+    hideAuthScreen();
+    if (mode === "register") {
+      try {
         resetPlayerForNewAccount();
+      } catch (error) {
+        console.error("Failed to reset the player for a new account", error);
+      }
+    }
+    try {
+      bootstrapAuthenticatedApp();
+    } catch (error) {
+      console.error("Failed to initialize the authenticated app", error);
+      hideAuthScreen();
+      if (mode === "register" && payload.user.music_preferences_completed_at === null) {
         void showArtistOnboarding("onboarding");
       } else {
-        bootstrapAuthenticatedApp();
+        showTrackNotice("Аккаунт готов. Перезапустите приложение, если данные не появились сразу");
       }
-    } catch {
-      setAuthError(mode === "register" ? "Не удалось создать аккаунт. Проверьте введённые данные." : "Не удалось войти. Проверьте логин и пароль.");
     } finally {
       if (submit) {
         submit.disabled = false;
