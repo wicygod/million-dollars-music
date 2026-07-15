@@ -1,9 +1,23 @@
 ﻿import { LEGACY_TRACK_ID_MAP, getInitialMetadataFeed, loadHomeFeed, type MetadataFeed, type Track } from "./metadataFeedService";
 import { EqualizerEngine, DEFAULT_EQUALIZER, EQ_FREQUENCIES, EQ_PRESETS, equalizerCurvePoints, formatEqFrequency, formatEqGain, type EqualizerPreset, type EqualizerPresetId, type EqualizerState } from "./features/equalizer";
+import { invalidateHomeFeedCache } from "./metadataFeedService";
 import { applyHistorySummaryToProfile, pluralizeTracks } from "./features/profile";
 import { filterLocalSearchTracks, highlightMatch } from "./features/search";
 import { ACCENT_COLORS, DEFAULT_SETTINGS, settingSwitch, type PlayerSettings } from "./features/settings";
 import { PlaybackCycleGate } from "./features/playbackHistory";
+import {
+  beginArtistPageLoad,
+  canContinueArtistOnboarding,
+  createArtistOnboardingState,
+  failArtistPageLoad,
+  isArtistSelected,
+  mergeArtistPage,
+  selectedArtistIds,
+  setArtistSearch,
+  toggleArtistSelection,
+  type ArtistOnboardingState,
+} from "./features/artistOnboarding";
+import { PlaybackSessionTracker, type PlaybackEndReason, type PlaybackSessionEvent } from "./features/playbackSession";
 import { loadHlsConstructor, type HlsPlayer } from "./player/hlsLoader";
 import { disableNativeContextMenu } from "./contextMenu";
 import {
@@ -16,18 +30,26 @@ import {
   getArtistTracks,
   getAuthToken,
   getHistorySummary,
+  getMusicPreferences,
+  getOnboardingArtists,
   getUserFavorites,
   getStoredAuthUser,
   getTrack as fetchTrack,
   loginAccount,
   mapBackendTrack,
   prepareTrackPlayback,
+  postFeedEvent,
+  postMusicSignal,
   recordTrackPlay,
   registerAccount,
+  resolveBackendImageUrl,
+  saveMusicPreferences,
   searchCatalog,
   submitBugReport,
+  submitPlaybackEvent,
   setUserFavorite,
   type AuthUser,
+  type OnboardingArtist,
   updateAvatar,
   updateNickname,
   withAppToken,
@@ -44,6 +66,15 @@ type TrackId = Track["id"];
 let metadataFeed: MetadataFeed = getInitialMetadataFeed();
 let tracks: Track[] = [...metadataFeed.all];
 let currentAuthUser: AuthUser | null = getStoredAuthUser();
+let artistOnboardingState: ArtistOnboardingState<OnboardingArtist> = createArtistOnboardingState<OnboardingArtist>();
+let artistOnboardingMode: "onboarding" | "settings" = "onboarding";
+let artistOnboardingRequest = 0;
+let artistOnboardingTouched = false;
+let artistSearchTimer: number | null = null;
+let artistOnboardingReturnFocus: HTMLElement | null = null;
+const recommendationImpressions = new Set<string>();
+let recommendationImpressionObserver: IntersectionObserver | null = null;
+const recordedArtistViews = new Set<string>();
 
 const PRIORITY_ARTISTS = ["lil peep", "9 mice", "kai angel", "viperr", "pharaoh", "темный принц", "тёмный принц", "fortuna812", "face", "cupsize", "madkid", "снялцепи"];
 const POPULAR_INITIAL_RENDER = 24;
@@ -112,7 +143,6 @@ const prevBtn = document.getElementById("prevBtn")!;
 const nextBtn = document.getElementById("nextBtn")!;
 const likeBtn = document.getElementById("likeBtn")!;
 const repeatBtn = document.getElementById("repeatBtn")!;
-const shufflePlayBtn = document.getElementById("shufflePlayBtn")!;
 const volumeBtn = document.getElementById("volumeBtn")!;
 const timelineContainer = document.getElementById("timelineContainer")!;
 const timelineFill = document.getElementById("timelineFill")!;
@@ -320,6 +350,7 @@ function resetPlayerForNewAccount() {
   player.queue = [];
   player.queueIndex = -1;
   playbackHistoryGate.reset();
+  playbackSessionTracker.reset();
 
   document.querySelector<HTMLButtonElement>(".queue-close")?.click();
   if (focusOverlay.classList.contains("active")) closeFocusPlayer();
@@ -462,6 +493,9 @@ function getCurrentDuration(track: Track): number {
 }
 
 const playbackHistoryGate = new PlaybackCycleGate();
+const playbackSessionTracker = new PlaybackSessionTracker();
+let recommendationRefreshTimer: number | null = null;
+let recommendationFeedStale = false;
 let listeningClockStartedAt: number | null = null;
 let pendingListeningMilliseconds = 0;
 let listeningSyncInFlight = false;
@@ -526,6 +560,51 @@ function pushRecentTrack(track: Track) {
   if (currentPage === "home") switchPage("home", null, true);
 }
 
+function queueRecommendationRefresh() {
+  if (recommendationRefreshTimer !== null) window.clearTimeout(recommendationRefreshTimer);
+  recommendationRefreshTimer = window.setTimeout(() => {
+    recommendationRefreshTimer = null;
+    recommendationFeedStale = true;
+    invalidateHomeFeedCache(currentAuthUser?.id);
+    if (currentPage === "home") {
+      recommendationFeedStale = false;
+      refreshMetadataFeed(1, metadataFeedGeneration);
+    }
+  }, 1800);
+}
+
+function submitFinalizedPlayback(event: PlaybackSessionEvent | null, keepalive = false) {
+  if (!event || !getAuthToken() || !/^\d+$/.test(String(event.trackId))) return;
+  const safeEvent: PlaybackSessionEvent = {
+    ...event,
+    artistId: event.artistId && /^\d+$/.test(String(event.artistId)) ? event.artistId : null,
+  };
+  try {
+    void submitPlaybackEvent(safeEvent, { keepalive })
+      .then(() => { if (!keepalive) queueRecommendationRefresh(); })
+      .catch(() => undefined);
+  } catch {
+    /* non-catalog fallback tracks are intentionally not sent */
+  }
+}
+
+function finalizePlaybackSession(reason: PlaybackEndReason) {
+  submitFinalizedPlayback(playbackSessionTracker.finalize(reason), reason === "pagehide");
+}
+
+function beginPlaybackSession(track: Track) {
+  submitFinalizedPlayback(playbackSessionTracker.begin({
+    trackId: track.id,
+    artistId: track.artistId || track.artists?.[0]?.id || null,
+    trackDuration: getCurrentDuration(track),
+    context: currentPage || "unknown",
+    recommendationType: track.recommendationType || null,
+    recommendationReason: track.recommendationReason || null,
+    algorithmVersion: track.algorithmVersion || metadataFeed.algorithmVersion || null,
+    playing: true,
+  }));
+}
+
 function recordActiveTrackPlay() {
   const trackId = activeAudioTrackId;
   if (!trackId) return;
@@ -533,7 +612,10 @@ function recordActiveTrackPlay() {
   if (playbackCycle === null) return;
 
   const localTrack = getTrack(trackId);
-  if (localTrack) pushRecentTrack(localTrack);
+  if (localTrack) {
+    pushRecentTrack(localTrack);
+    beginPlaybackSession(localTrack);
+  }
 
   recordTrackPlay(trackId)
     .then((backendTrack) => {
@@ -586,7 +668,10 @@ window.setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) void flushListeningProgress();
 });
-window.addEventListener("pagehide", () => { void flushListeningProgress(); });
+window.addEventListener("pagehide", () => {
+  finalizePlaybackSession("pagehide");
+  void flushListeningProgress();
+});
 
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
@@ -594,7 +679,7 @@ window.addEventListener("pagehide", () => { void flushListeningProgress(); });
 
 function loadTrackById(id: TrackId, autoplay = player.playing) {
   keepPlayerEmptyUntilSelection = false;
-  stopAudio();
+  stopAudio("track_change");
   const track = getTrack(id);
   if (!track) return;
   const canPlay = canPlayTrack(track);
@@ -743,7 +828,9 @@ function toggleTrackLike(trackId: TrackId) {
   if (currentPage === "favorites") renderFavorites();
   saveLikedTracks();
   if (/^\d+$/.test(String(trackId)) && getAuthToken()) {
-    void setUserFavorite(trackId, track.liked).catch(() => undefined);
+    void setUserFavorite(trackId, track.liked)
+      .then(() => queueRecommendationRefresh())
+      .catch(() => undefined);
   }
 }
 
@@ -762,6 +849,8 @@ function switchPage(pageId: string, extraParam: string | null = null, preserveSc
   const content = document.getElementById("appContent")!;
   recentScrollbarCleanup?.();
   recentScrollbarCleanup = null;
+  recommendationImpressionObserver?.disconnect();
+  recommendationImpressionObserver = null;
   const previousScrollTop = content.scrollTop;
   currentPage = pageId;
   currentPageParam = extraParam;
@@ -802,6 +891,10 @@ function switchPage(pageId: string, extraParam: string | null = null, preserveSc
     track: "Трек", search: "Результаты поиска",
   };
   if (!preserveScroll) announce(`Открыта страница: ${pageLabels[pageId] || "Главная"}`);
+  if (pageId === "home" && recommendationFeedStale) {
+    recommendationFeedStale = false;
+    refreshMetadataFeed(1, metadataFeedGeneration);
+  }
 }
 
 function applyMetadataFeed(feed: MetadataFeed) {
@@ -843,6 +936,7 @@ function refreshMetadataFeed(attempt = 1, generation = metadataFeedGeneration) {
       const currentSignature = [
         signature(tracks),
         signature(metadataFeed.recent),
+        signature(metadataFeed.personalized || []),
         signature(metadataFeed.trending),
         signature(metadataFeed.ru),
         signature(metadataFeed.global),
@@ -850,11 +944,12 @@ function refreshMetadataFeed(attempt = 1, generation = metadataFeedGeneration) {
       const nextSignature = [
         signature(feed.all),
         signature(feed.recent),
+        signature(feed.personalized || []),
         signature(feed.trending),
         signature(feed.ru),
         signature(feed.global),
       ].join("::");
-      if (feed.source !== metadataFeed.source || feed.errorMessage !== metadataFeed.errorMessage || currentSignature !== nextSignature) {
+      if (feed.source !== metadataFeed.source || feed.errorMessage !== metadataFeed.errorMessage || feed.personalizationActive !== metadataFeed.personalizationActive || currentSignature !== nextSignature) {
         applyMetadataFeed(feed);
       }
       schedulePopularTrackWarmup(feed.trending.length ? feed.trending : feed.all);
@@ -955,9 +1050,13 @@ function ensureAuthOverlay(): HTMLElement {
         : await loginAccount(login, password);
       currentAuthUser = payload.user;
       hydrateAccountState(true);
-      if (mode === "register") resetPlayerForNewAccount();
       hideAuthScreen();
-      bootstrapAuthenticatedApp();
+      if (mode === "register") {
+        resetPlayerForNewAccount();
+        void showArtistOnboarding("onboarding");
+      } else {
+        bootstrapAuthenticatedApp();
+      }
     } catch {
       setAuthError(mode === "register" ? "Не удалось создать аккаунт. Проверьте введённые данные." : "Не удалось войти. Проверьте логин и пароль.");
     } finally {
@@ -972,11 +1071,15 @@ function ensureAuthOverlay(): HTMLElement {
 }
 
 function showAuthScreen(message = "") {
+  // A cached account can expire while the mandatory artist picker is open.
+  // Always dismiss that dialog first so the sign-in form cannot be trapped
+  // underneath an inert onboarding layer.
+  hideArtistOnboarding();
   const overlay = ensureAuthOverlay();
   setAuthFormMode("login");
   overlay.classList.add("is-visible");
   document.body.classList.add("auth-locked");
-  document.querySelectorAll<HTMLElement>("header, aside, footer, #appContent, .mobile-nav").forEach((element) => {
+  getAppShellRegions().forEach((element) => {
     element.inert = true;
     element.setAttribute("aria-hidden", "true");
   });
@@ -987,14 +1090,290 @@ function showAuthScreen(message = "") {
 function hideAuthScreen() {
   document.getElementById("authOverlay")?.classList.remove("is-visible");
   document.body.classList.remove("auth-locked");
-  document.querySelectorAll<HTMLElement>("header, aside, footer, #appContent, .mobile-nav").forEach((element) => {
-    element.inert = false;
-    element.removeAttribute("aria-hidden");
+  const onboardingLocked = document.body.classList.contains("artist-onboarding-locked");
+  getAppShellRegions().forEach((element) => {
+    element.inert = onboardingLocked;
+    if (onboardingLocked) element.setAttribute("aria-hidden", "true");
+    else element.removeAttribute("aria-hidden");
   });
 }
 
+function getAppShellRegions(): HTMLElement[] {
+  // Keep modal content out of the inert target set. Artist onboarding contains
+  // its own semantic <header>/<footer>, so a global tag selector would make
+  // the visible dialog actions impossible to click or reach by keyboard.
+  return Array.from(document.querySelectorAll<HTMLElement>(
+    "#appRoot > header, #appRoot > div > aside, #appContent, #appRoot > footer.player-bar, #appRoot > .mobile-nav",
+  ));
+}
+
+function setArtistOnboardingLocked(locked: boolean) {
+  document.body.classList.toggle("artist-onboarding-locked", locked);
+  const shellLocked = locked || document.body.classList.contains("auth-locked");
+  getAppShellRegions().forEach((element) => {
+    element.inert = shellLocked;
+    if (shellLocked) element.setAttribute("aria-hidden", "true");
+    else element.removeAttribute("aria-hidden");
+  });
+}
+
+function ensureArtistOnboardingOverlay(): HTMLElement {
+  let overlay = document.getElementById("artistOnboardingOverlay");
+  if (overlay) return overlay;
+  overlay = document.createElement("div");
+  overlay.id = "artistOnboardingOverlay";
+  overlay.className = "artist-onboarding-overlay";
+  overlay.setAttribute("aria-hidden", "true");
+  overlay.innerHTML = `
+    <section class="artist-onboarding-panel" role="dialog" aria-modal="true" aria-labelledby="artistOnboardingTitle">
+      <header class="artist-onboarding-head">
+        <div>
+          <p class="artist-onboarding-kicker">Настроим вашу волну</p>
+          <h1 id="artistOnboardingTitle">Кого вы любите слушать?</h1>
+          <p>Выберите артистов — главная сразу станет персональной, а затем будет меняться вместе с вашей историей.</p>
+        </div>
+        <button id="artistOnboardingClose" class="artist-onboarding-close" type="button" aria-label="Закрыть">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="artist-onboarding-toolbar">
+        <label class="artist-onboarding-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <span class="sr-only">Поиск артистов</span>
+          <input id="artistOnboardingSearch" type="search" autocomplete="off" maxlength="128" placeholder="Найти артиста" />
+        </label>
+        <span id="artistOnboardingCounter" class="artist-onboarding-counter" aria-live="polite"></span>
+      </div>
+      <div id="artistOnboardingStatus" class="artist-onboarding-status" role="status"></div>
+      <div id="artistOnboardingGrid" class="artist-onboarding-grid"></div>
+      <button id="artistOnboardingMore" class="artist-onboarding-more" type="button">Показать ещё</button>
+      <footer class="artist-onboarding-footer">
+        <button id="artistOnboardingSkip" class="artist-onboarding-skip" type="button">Пропустить</button>
+        <div class="artist-onboarding-footer-copy">
+          <strong id="artistOnboardingHint"></strong>
+          <span>Вы сможете изменить выбор в профиле</span>
+        </div>
+        <button id="artistOnboardingContinue" class="artist-onboarding-continue" type="button">Продолжить</button>
+      </footer>
+    </section>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector<HTMLInputElement>("#artistOnboardingSearch")?.addEventListener("input", (event) => {
+    artistOnboardingState = setArtistSearch(artistOnboardingState, (event.currentTarget as HTMLInputElement).value);
+    renderArtistOnboarding();
+    if (artistSearchTimer !== null) window.clearTimeout(artistSearchTimer);
+    artistSearchTimer = window.setTimeout(() => void loadArtistOnboardingPage(true), 320);
+  });
+  overlay.querySelector("#artistOnboardingMore")?.addEventListener("click", () => void loadArtistOnboardingPage(false));
+  overlay.querySelector("#artistOnboardingContinue")?.addEventListener("click", () => void completeArtistOnboarding(false));
+  overlay.querySelector("#artistOnboardingSkip")?.addEventListener("click", () => void completeArtistOnboarding(true));
+  overlay.querySelector("#artistOnboardingClose")?.addEventListener("click", closeArtistOnboardingSettings);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay && artistOnboardingMode === "settings") closeArtistOnboardingSettings();
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && artistOnboardingMode === "settings") {
+      event.preventDefault();
+      closeArtistOnboardingSettings();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...overlay!.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled])")]
+      .filter((element) => !element.hidden && !element.classList.contains("hidden"));
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
+  return overlay;
+}
+
+function artistInitials(name: string): string {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "♪";
+}
+
+function renderArtistOnboarding() {
+  const overlay = ensureArtistOnboardingOverlay();
+  const grid = overlay.querySelector<HTMLElement>("#artistOnboardingGrid");
+  const status = overlay.querySelector<HTMLElement>("#artistOnboardingStatus");
+  const counter = overlay.querySelector<HTMLElement>("#artistOnboardingCounter");
+  const hint = overlay.querySelector<HTMLElement>("#artistOnboardingHint");
+  const more = overlay.querySelector<HTMLButtonElement>("#artistOnboardingMore");
+  const next = overlay.querySelector<HTMLButtonElement>("#artistOnboardingContinue");
+  const skip = overlay.querySelector<HTMLButtonElement>("#artistOnboardingSkip");
+  const close = overlay.querySelector<HTMLButtonElement>("#artistOnboardingClose");
+  const selectedCount = artistOnboardingState.selectedIds.size;
+  const shortfall = Math.max(0, artistOnboardingState.minimumSelection - selectedCount);
+
+  if (counter) counter.textContent = `Выбрано: ${selectedCount}`;
+  if (hint) hint.textContent = shortfall ? `Выберите ещё ${shortfall}` : selectedCount ? "Отличный выбор" : "Можно изменить позже";
+  if (next) next.disabled = artistOnboardingMode === "onboarding" && !canContinueArtistOnboarding(artistOnboardingState);
+  if (skip) skip.classList.toggle("hidden", artistOnboardingMode !== "onboarding");
+  if (close) close.classList.toggle("hidden", artistOnboardingMode === "onboarding");
+  if (more) {
+    more.classList.toggle("hidden", !artistOnboardingState.hasMore || artistOnboardingState.items.length === 0);
+    more.disabled = artistOnboardingState.loading;
+    more.textContent = artistOnboardingState.loading ? "Загружаем…" : "Показать ещё";
+  }
+  if (status) {
+    status.innerHTML = artistOnboardingState.error
+      ? `<div class="artist-onboarding-error"><span>${escapeHtml(artistOnboardingState.error)}</span><button id="artistOnboardingRetry" type="button">Повторить</button></div>`
+      : artistOnboardingState.loading && artistOnboardingState.items.length === 0
+        ? `<div class="artist-onboarding-loading"><i></i><span>Собираем артистов разных жанров…</span></div>`
+        : !artistOnboardingState.loading && artistOnboardingState.items.length === 0
+          ? `<div class="artist-onboarding-empty"><strong>Ничего не найдено</strong><span>Попробуйте изменить запрос</span></div>`
+          : "";
+    status.querySelector("#artistOnboardingRetry")?.addEventListener("click", () => void loadArtistOnboardingPage(artistOnboardingState.page === 0));
+  }
+  if (!grid) return;
+  grid.innerHTML = artistOnboardingState.items.map((artist) => {
+    const selected = isArtistSelected(artistOnboardingState, artist.id);
+    const imageUrl = resolveBackendImageUrl(artist.avatarUrl);
+    return `
+      <button class="artist-choice-card${selected ? " is-selected" : ""}" data-artist-choice="${artist.id}" type="button" aria-pressed="${String(selected)}" aria-label="${selected ? "Убрать" : "Выбрать"}: ${escapeHtml(artist.name)}">
+        <span class="artist-choice-image">
+          ${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="" loading="lazy" decoding="async" />` : ""}
+          <span>${escapeHtml(artistInitials(artist.name))}</span>
+          <i aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m6.5 12.5 3.5 3.5 7.5-8"/></svg></i>
+        </span>
+        <strong>${escapeHtml(artist.name)}</strong>
+        <small>${artist.genres.slice(0, 2).map(escapeHtml).join(" · ") || `${artist.trackCount} треков`}</small>
+      </button>
+    `;
+  }).join("");
+  grid.querySelectorAll<HTMLButtonElement>("[data-artist-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const artistId = button.dataset.artistChoice;
+      if (!artistId) return;
+      artistOnboardingTouched = true;
+      artistOnboardingState = toggleArtistSelection(artistOnboardingState, artistId);
+      renderArtistOnboarding();
+      window.requestAnimationFrame(() => {
+        [...grid.querySelectorAll<HTMLButtonElement>("[data-artist-choice]")]
+          .find((candidate) => candidate.dataset.artistChoice === artistId)
+          ?.focus();
+      });
+    });
+    button.querySelector<HTMLImageElement>("img")?.addEventListener("error", (event) => {
+      (event.currentTarget as HTMLImageElement).hidden = true;
+    }, { once: true });
+  });
+}
+
+async function loadArtistOnboardingPage(reset: boolean) {
+  if (artistOnboardingState.loading && !reset) return;
+  const requestId = ++artistOnboardingRequest;
+  const requestedSearch = artistOnboardingState.search;
+  const page = reset ? 1 : Math.max(1, artistOnboardingState.page + 1);
+  artistOnboardingState = beginArtistPageLoad(artistOnboardingState);
+  renderArtistOnboarding();
+  try {
+    const response = await getOnboardingArtists({
+      search: requestedSearch,
+      page,
+      limit: requestedSearch ? 1 : 24,
+    });
+    if (requestId !== artistOnboardingRequest) return;
+    const localPage = artistOnboardingTouched
+      ? { ...response, items: response.items.map((artist) => ({ ...artist, selected: artistOnboardingState.selectedIds.has(String(artist.id)) })) }
+      : response;
+    artistOnboardingState = mergeArtistPage(artistOnboardingState, localPage, requestedSearch);
+    if (artistOnboardingMode === "onboarding" && typeof response.minimumRequired === "number") {
+      artistOnboardingState = { ...artistOnboardingState, minimumSelection: response.minimumRequired };
+    }
+  } catch {
+    if (requestId !== artistOnboardingRequest) return;
+    artistOnboardingState = failArtistPageLoad(artistOnboardingState, "Не удалось загрузить артистов. Проверьте подключение.");
+  }
+  renderArtistOnboarding();
+}
+
+async function showArtistOnboarding(mode: "onboarding" | "settings") {
+  const overlay = ensureArtistOnboardingOverlay();
+  artistOnboardingReturnFocus = mode === "settings" && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  artistOnboardingMode = mode;
+  artistOnboardingTouched = false;
+  const openingToken = ++artistOnboardingRequest;
+  artistOnboardingState = createArtistOnboardingState<OnboardingArtist>({ minimumSelection: mode === "onboarding" ? 3 : 0 });
+  overlay.classList.add("is-visible");
+  overlay.setAttribute("aria-hidden", "false");
+  setArtistOnboardingLocked(true);
+  const input = overlay.querySelector<HTMLInputElement>("#artistOnboardingSearch");
+  if (input) input.value = "";
+  renderArtistOnboarding();
+  window.setTimeout(() => input?.focus(), 50);
+  if (mode === "settings") {
+    try {
+      const preferences = await getMusicPreferences();
+      artistOnboardingState = {
+        ...artistOnboardingState,
+        selectedIds: new Set(preferences.selectedArtistIds.map(String)),
+      };
+    } catch {
+      hideArtistOnboarding(true);
+      showTrackNotice("Не удалось загрузить сохранённые предпочтения");
+      return;
+    }
+  }
+  if (openingToken !== artistOnboardingRequest || !overlay.classList.contains("is-visible")) return;
+  await loadArtistOnboardingPage(true);
+}
+
+function hideArtistOnboarding(restoreFocus = false) {
+  if (artistSearchTimer !== null) {
+    window.clearTimeout(artistSearchTimer);
+    artistSearchTimer = null;
+  }
+  artistOnboardingRequest++;
+  const overlay = document.getElementById("artistOnboardingOverlay");
+  overlay?.classList.remove("is-visible");
+  overlay?.setAttribute("aria-hidden", "true");
+  setArtistOnboardingLocked(false);
+  const returnFocus = artistOnboardingReturnFocus;
+  artistOnboardingReturnFocus = null;
+  if (restoreFocus && returnFocus?.isConnected) {
+    window.setTimeout(() => returnFocus.focus(), 0);
+  }
+}
+
+function closeArtistOnboardingSettings() {
+  if (artistOnboardingMode !== "settings") return;
+  hideArtistOnboarding(true);
+}
+
+async function completeArtistOnboarding(skipped: boolean) {
+  if (artistOnboardingMode !== "onboarding" && skipped) return;
+  if (!skipped && artistOnboardingMode === "onboarding" && !canContinueArtistOnboarding(artistOnboardingState)) return;
+  const overlay = ensureArtistOnboardingOverlay();
+  const buttons = overlay.querySelectorAll<HTMLButtonElement>("button");
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const ids = skipped ? [] : selectedArtistIds(artistOnboardingState).map(Number).filter(Number.isInteger);
+    const preferences = await saveMusicPreferences(ids, artistOnboardingMode, skipped);
+    if (currentAuthUser && preferences.completedAt) {
+      currentAuthUser = { ...currentAuthUser, music_preferences_completed_at: preferences.completedAt };
+    }
+    hideArtistOnboarding();
+    invalidateHomeFeedCache(currentAuthUser?.id);
+    metadataFeedGeneration++;
+    switchPage(artistOnboardingMode === "settings" ? currentPage : "home", currentPageParam);
+    refreshMetadataFeed(1, metadataFeedGeneration);
+    void syncFavoritesWithBackend();
+    showTrackNotice(skipped ? "Настроим рекомендации по вашей истории" : "Музыкальные предпочтения сохранены");
+  } catch {
+    showTrackNotice("Не удалось сохранить предпочтения");
+    renderArtistOnboarding();
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+    renderArtistOnboarding();
+  }
+}
+
 function logoutAccount() {
-  stopAudio();
+  stopAudio("track_change");
   currentAuthUser = null;
   clearAuthToken();
   hydrateAccountState(true);
@@ -1013,9 +1392,13 @@ function bootstrapAuthenticatedApp() {
     currentAuthUser = cachedUser;
     hydrateAccountState();
     hideAuthScreen();
-    switchPage(currentPage || "home", currentPageParam);
-    refreshMetadataFeed();
-    void syncFavoritesWithBackend();
+    if (cachedUser.music_preferences_completed_at === null) {
+      void showArtistOnboarding("onboarding");
+    } else {
+      switchPage(currentPage || "home", currentPageParam);
+      refreshMetadataFeed();
+      void syncFavoritesWithBackend();
+    }
   }
   fetchCurrentUser()
     .then((user) => {
@@ -1023,6 +1406,14 @@ function bootstrapAuthenticatedApp() {
       currentAuthUser = user;
       if (previousUserId !== user.id) hydrateAccountState(true);
       hideAuthScreen();
+      if (user.music_preferences_completed_at === null) {
+        if (!document.getElementById("artistOnboardingOverlay")?.classList.contains("is-visible")) {
+          void showArtistOnboarding("onboarding");
+        } else {
+          setArtistOnboardingLocked(true);
+        }
+        return;
+      }
       if (!restoredFromCache) {
         switchPage(currentPage || "home", currentPageParam);
         refreshMetadataFeed();
@@ -1190,7 +1581,7 @@ function wireCardTrackActions(container: HTMLElement): void {
   });
 }
 
-function renderHomeTrackRail(title: string, items: Track[]): string {
+function renderHomeTrackRail(title: string, items: Track[], showRecommendationReason = false): string {
   if (!items.length) return "";
   return `
     <section class="home-rail-section">
@@ -1199,12 +1590,12 @@ function renderHomeTrackRail(title: string, items: Track[]): string {
         <span class="text-xs text-white/35">${items.length}</span>
       </div>
       <div class="home-compact-rail">
-        ${items.map((t) => `
-          <div class="home-compact-card group cursor-pointer" data-id="${t.id}">
+        ${items.map((t, index) => `
+          <div class="home-compact-card group cursor-pointer" data-id="${t.id}"${showRecommendationReason ? ` data-recommendation-position="${index}"` : ""}>
             ${renderCover(t, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}
             <div class="min-w-0 flex-1">
               <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
-              <p class="text-xs text-white/40 truncate">${escapeHtml(t.artist)}</p>
+              <p class="text-xs text-white/40 truncate">${escapeHtml(showRecommendationReason && t.recommendationReason ? t.recommendationReason : t.artist)}</p>
             </div>
             ${renderCardTrackActions(t)}
             <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
@@ -1215,15 +1606,61 @@ function renderHomeTrackRail(title: string, items: Track[]): string {
   `;
 }
 
+function recordRecommendationImpression(track: Track, position: number) {
+  if (!/^\d+$/.test(String(track.id)) || !track.recommendationType) return;
+  const impressionKey = `${metadataFeed.loadedAt}:${track.id}:${position}`;
+  if (recommendationImpressions.has(impressionKey)) return;
+  recommendationImpressions.add(impressionKey);
+  void postFeedEvent({
+    eventId: `impression-${metadataFeed.loadedAt}-${track.id}-${position}`,
+    trackId: track.id,
+    eventType: "recommendation_impression",
+    position,
+    recommendationType: track.recommendationType,
+    reason: track.recommendationReason || null,
+    algorithmVersion: track.algorithmVersion || metadataFeed.algorithmVersion || "personalized-v1",
+    context: "home",
+  }).catch(() => undefined);
+}
+
+function observeRecommendationImpressions(container: HTMLElement, personalized: Track[]) {
+  const elements = [...container.querySelectorAll<HTMLElement>("[data-recommendation-position]")];
+  if (!elements.length) return;
+  if (!("IntersectionObserver" in window)) {
+    elements.slice(0, 4).forEach((element) => {
+      const position = Number(element.dataset.recommendationPosition);
+      const track = personalized[position];
+      if (track) recordRecommendationImpression(track, position);
+    });
+    return;
+  }
+  recommendationImpressionObserver = new IntersectionObserver((entries, observer) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting || entry.intersectionRatio < 0.55) return;
+      const element = entry.target as HTMLElement;
+      const position = Number(element.dataset.recommendationPosition);
+      const track = personalized[position];
+      if (track && String(track.id) === String(element.dataset.id)) {
+        recordRecommendationImpression(track, position);
+      }
+      observer.unobserve(element);
+    });
+  }, { root: container, threshold: 0.55 });
+  elements.forEach((element) => recommendationImpressionObserver?.observe(element));
+}
+
 function renderHome(container: HTMLElement) {
+  recommendationImpressionObserver?.disconnect();
+  recommendationImpressionObserver = null;
   const recent = metadataFeed.recent.slice(0, 32);
+  const personalized = (metadataFeed.personalized || []).slice(0, 24);
   const ru = metadataFeed.ru.slice(0, 12);
   const global = metadataFeed.global.slice(0, 12);
   const popular = metadataFeed.trending;
   popularVisibleCount = Math.max(POPULAR_INITIAL_RENDER, Math.min(popularVisibleCount, popular.length || POPULAR_INITIAL_RENDER));
   const visiblePopular = popular.slice(0, popularVisibleCount);
   const status = metadataFeed.errorMessage ? `<div class="backend-status mb-5">${escapeHtml(metadataFeed.errorMessage)}</div>` : "";
-  const heroTrack = popular[0] || recent[0] || tracks[0];
+  const heroTrack = personalized[0] || popular[0] || recent[0] || tracks[0];
   const hero = heroTrack ? `
     <section class="home-hero-prism">
       <div class="home-hero-copy">
@@ -1242,6 +1679,7 @@ function renderHome(container: HTMLElement) {
   container.innerHTML = `
     ${hero}
     ${status}
+    ${renderHomeTrackRail(metadataFeed.personalizationActive ? "Для тебя" : "Начните отсюда", personalized, true)}
     <section class="mb-8">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-base font-semibold tracking-wide">Недавнее</h2>
@@ -1308,6 +1746,8 @@ function renderHome(container: HTMLElement) {
     });
   });
   wireCardTrackActions(container);
+  if (recommendationImpressions.size > 1200) recommendationImpressions.clear();
+  observeRecommendationImpressions(container, personalized);
   container.querySelectorAll<HTMLElement>(".card-play-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1765,6 +2205,7 @@ function renderProfile(container: HTMLElement) {
       </div>
       <div class="profile-hero-actions">
         <button id="profileFavoritesBtn" class="profile-action-btn" type="button">Избранное</button>
+        <button id="profileMusicTasteBtn" class="profile-action-btn" type="button">Музыкальный вкус</button>
         <button id="profileEqualizerBtn" class="profile-action-btn" type="button">Эквалайзер</button>
         <button id="profileSettingsBtn" class="profile-action-btn" type="button">Настройки</button>
       </div>
@@ -1812,6 +2253,7 @@ function renderProfile(container: HTMLElement) {
   `;
 
   container.querySelector("#profileFavoritesBtn")?.addEventListener("click", () => switchPage("favorites"));
+  container.querySelector("#profileMusicTasteBtn")?.addEventListener("click", () => void showArtistOnboarding("settings"));
   container.querySelector("#profileSettingsBtn")?.addEventListener("click", () => switchPage("settings"));
   container.querySelector("#profileEqualizerBtn")?.addEventListener("click", showEqualizerModal);
 
@@ -1929,6 +2371,17 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
         if (!isCurrentArtist()) return;
         const artistTracks = mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
         const primary = artistTracks[0];
+        if (primary && /^\d+$/.test(String(primary.id)) && !recordedArtistViews.has(artistName)) {
+          recordedArtistViews.add(artistName);
+          void postMusicSignal({
+            signal: "artist_view",
+            trackId: primary.id,
+            artistId: artistName,
+            context: "artist",
+          })
+            .then(() => queueRecommendationRefresh())
+            .catch(() => recordedArtistViews.delete(artistName));
+        }
         container.innerHTML = `
           <div class="relative rounded-2xl overflow-hidden mb-6 p-6 artist-hero">
             <div class="absolute inset-0 bg-gradient-to-br ${primary?.gradient || "from-slate-700 to-zinc-950"} opacity-70"></div>
@@ -1981,6 +2434,18 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
     return;
   }
   const primary = artistTracks[0];
+  const artistSignalId = primary.artistId || primary.artists?.[0]?.id;
+  if (artistSignalId && /^\d+$/.test(String(primary.id)) && /^\d+$/.test(String(artistSignalId)) && !recordedArtistViews.has(String(artistSignalId))) {
+    recordedArtistViews.add(String(artistSignalId));
+    void postMusicSignal({
+      signal: "artist_view",
+      trackId: primary.id,
+      artistId: artistSignalId,
+      context: "artist",
+    })
+      .then(() => queueRecommendationRefresh())
+      .catch(() => recordedArtistViews.delete(String(artistSignalId)));
+  }
   container.innerHTML = `
     <div class="relative rounded-2xl overflow-hidden mb-6 p-6 artist-hero">
       <div class="absolute inset-0 bg-gradient-to-br ${primary.gradient} opacity-70"></div>
@@ -2007,10 +2472,13 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
 }
 
 function setFocusBackgroundInert(value: boolean) {
-  document.querySelectorAll<HTMLElement>("header, aside, footer, #appContent, .mobile-nav").forEach((element) => {
-    element.inert = value;
-    if (value) element.setAttribute("aria-hidden", "true");
-    else if (!document.body.classList.contains("auth-locked")) element.removeAttribute("aria-hidden");
+  const shellLocked = value
+    || document.body.classList.contains("auth-locked")
+    || document.body.classList.contains("artist-onboarding-locked");
+  getAppShellRegions().forEach((element) => {
+    element.inert = shellLocked;
+    if (shellLocked) element.setAttribute("aria-hidden", "true");
+    else element.removeAttribute("aria-hidden");
   });
 }
 
@@ -2057,7 +2525,7 @@ focusPlayBtn.addEventListener("click", playPause);
 focusPrevBtn.addEventListener("click", () => playPrev());
 focusNextBtn.addEventListener("click", () => playNext());
 focusRepeatBtn.addEventListener("click", () => repeatBtn.click());
-focusShuffleBtn.addEventListener("click", () => shufflePlayBtn.click());
+focusShuffleBtn.addEventListener("click", toggleShuffle);
 focusQueueBtn.addEventListener("click", () => {
   focusReturnTarget = nowPlayingFocus;
   closeFocusPlayer();
@@ -2248,6 +2716,7 @@ function renderSettings(container: HTMLElement) {
 
       <section class="settings-card-v2 is-wide">
         <div class="settings-section-head"><h3>Персональный звук</h3><span>10 полос</span></div>
+        <div class="setting-row"><div><strong>Музыкальные предпочтения</strong><small>Изменить любимых артистов и обновить персональную ленту</small></div><button id="openMusicPreferences" class="profile-action-btn" type="button">Выбрать артистов</button></div>
         <div class="setting-row"><div><strong>Эквалайзер</strong><small>${equalizerState.enabled ? `Активен профиль «${EQ_PRESETS[equalizerState.preset].label}»` : "Сейчас звук воспроизводится без коррекции"}</small></div><button id="openEqualizerSettings" class="profile-action-btn" type="button">Настроить</button></div>
         <div class="setting-row"><div><strong>Million Music Desktop</strong><small>Версия 1.2 · защищённое подключение к музыкальному каталогу</small></div><span class="text-xs text-emerald-300">● Онлайн</span></div>
         <div class="setting-row"><div><strong>Помочь улучшить приложение</strong><small>Опишите проблему — отчёт попадёт в админ-панель</small></div><button id="bugReportBtn" class="profile-action-btn" type="button">Сообщить о баге</button></div>
@@ -2266,6 +2735,7 @@ function renderSettings(container: HTMLElement) {
   });
   container.querySelector("#accentSelect")?.addEventListener("change", () => { saveSettings(); applySettingsEffects(); });
   container.querySelector("#openEqualizerSettings")?.addEventListener("click", showEqualizerModal);
+  container.querySelector("#openMusicPreferences")?.addEventListener("click", () => void showArtistOnboarding("settings"));
   container.querySelector("#bugReportBtn")?.addEventListener("click", showBugReportModal);
   container.querySelector("#resetSettingsBtn")?.addEventListener("click", () => {
     localStorage.removeItem(accountStorageKey(STORAGE_KEY_SETTINGS));
@@ -3044,10 +3514,18 @@ function hydrateAccountState(force = false) {
   hydratedAccountId = accountId;
   metadataFeedGeneration++;
   if (accountChanged) {
-    metadataFeed = { ...metadataFeed, recent: [] };
+    // Never render or report impressions from the previous account while the
+    // next user's feed request is still in flight. The cache is account-scoped;
+    // a new account without a cache receives the neutral fallback only.
+    metadataFeed = getInitialMetadataFeed(accountId);
+    tracks = [...metadataFeed.all];
+    popularVisibleCount = POPULAR_INITIAL_RENDER;
     pendingListeningMilliseconds = 0;
     listeningClockStartedAt = null;
     streamTicketCache.clear();
+    playbackSessionTracker.reset();
+    recordedArtistViews.clear();
+    recommendationImpressions.clear();
   }
   for (let index = playlists.length - 1; index >= 0; index--) {
     if (playlists[index].userCreated) playlists.splice(index, 1);
@@ -3143,6 +3621,11 @@ function addTrackToPlaylist(trackId: TrackId, playlistId: string): boolean {
   if (!list.includes(trackId)) list.push(trackId);
   savePlaylistTrackAssign();
   savePlaylistTrackRemoved();
+  if (getAuthToken() && /^\d+$/.test(String(trackId))) {
+    void postMusicSignal({ signal: "playlist", trackId, context: "playlist" })
+      .then(() => queueRecommendationRefresh())
+      .catch(() => undefined);
+  }
   return true;
 }
 
@@ -3158,6 +3641,11 @@ function removeTrackFromPlaylist(trackId: TrackId, playlistId: string) {
   }
   savePlaylistTrackAssign();
   savePlaylistTrackRemoved();
+  if (getAuthToken() && /^\d+$/.test(String(trackId))) {
+    void postMusicSignal({ signal: "playlist_remove", trackId, context: "playlist" })
+      .then(() => queueRecommendationRefresh())
+      .catch(() => undefined);
+  }
 }
 
 function showPlaylistPopup(anchor: HTMLElement, trackId: TrackId, onChange?: (playlistId: string) => void) {
@@ -3459,7 +3947,8 @@ function startAudio(track: Track, beginNewCycle = false) {
   });
 }
 
-function stopAudio() {
+function stopAudio(reason: PlaybackEndReason = "stop") {
+  finalizePlaybackSession(reason);
   playbackToken++;
   pendingSeekCleanup?.();
   pendingSeekCleanup = null;
@@ -3557,6 +4046,7 @@ audioEl.addEventListener("play", () => {
 audioEl.addEventListener("playing", recordActiveTrackPlay);
 
 audioEl.addEventListener("playing", () => {
+  playbackSessionTracker.resume();
   clearPlaybackBuffering();
   startListeningClock();
   player.playing = true;
@@ -3565,24 +4055,31 @@ audioEl.addEventListener("playing", () => {
 });
 
 audioEl.addEventListener("waiting", () => {
+  playbackSessionTracker.pause();
   pauseListeningClock();
   if (player.playing && activeAudioTrackId) beginPlaybackBuffering(playbackToken);
 });
 
 audioEl.addEventListener("stalled", () => {
+  playbackSessionTracker.pause();
   pauseListeningClock();
   if (player.playing && activeAudioTrackId) beginPlaybackBuffering(playbackToken);
 });
 
-audioEl.addEventListener("seeking", pauseListeningClock);
+audioEl.addEventListener("seeking", () => {
+  playbackSessionTracker.pause();
+  pauseListeningClock();
+});
 
 audioEl.addEventListener("seeked", () => {
   clearPlaybackBuffering();
+  playbackSessionTracker.resume();
   if (player.playing && !audioEl.paused) startListeningClock();
   updatePlayIcon();
 });
 
 audioEl.addEventListener("pause", () => {
+  playbackSessionTracker.pause();
   pauseListeningClock();
   if (audioEl.ended) return;
   clearPlaybackBuffering();
@@ -3611,6 +4108,7 @@ audioEl.addEventListener("loadedmetadata", () => {
   const track = getTrack(player.currentTrackId);
   if (!track) return;
   const duration = getCurrentDuration(track);
+  playbackSessionTracker.setTrackDuration(duration);
   totalTimeEl.textContent = formatTime(duration);
   focusTotalTime.textContent = formatTime(duration);
   updateAllTimelines();
@@ -3620,6 +4118,7 @@ audioEl.addEventListener("durationchange", () => {
   const track = getTrack(player.currentTrackId);
   if (!track) return;
   const duration = getCurrentDuration(track);
+  playbackSessionTracker.setTrackDuration(duration);
   totalTimeEl.textContent = formatTime(duration);
   focusTotalTime.textContent = formatTime(duration);
   updateAllTimelines();
@@ -3630,10 +4129,12 @@ audioEl.addEventListener("ended", () => {
   clearPlaybackBuffering();
   const track = getTrack(player.currentTrackId);
   if (player.repeat && track) {
+    finalizePlaybackSession("repeat");
     audioEl.currentTime = 0;
     startAudio(track, true);
     return;
   }
+  finalizePlaybackSession("ended");
   if (getPlayerSettings().autoplay && player.queue.length > 0) {
     playNext(true);
     return;
@@ -3643,6 +4144,7 @@ audioEl.addEventListener("ended", () => {
 });
 
 audioEl.addEventListener("error", () => {
+  finalizePlaybackSession("error");
   pauseListeningClock();
   clearPlaybackBuffering();
   if (!player.playing) return;
@@ -3813,14 +4315,11 @@ repeatBtn.addEventListener("click", function () {
   announce(player.repeat ? "Повтор включён" : "Повтор выключен");
 });
 
-shufflePlayBtn.addEventListener("click", function () {
+function toggleShuffle() {
   player.shuffle = !player.shuffle;
-  this.classList.toggle("text-indigo-400", player.shuffle);
-  this.classList.toggle("text-white/40", !player.shuffle);
-  this.setAttribute("aria-pressed", String(player.shuffle));
   focusShuffleBtn.setAttribute("aria-pressed", String(player.shuffle));
   announce(player.shuffle ? "Перемешивание включено" : "Перемешивание выключено");
-});
+}
 
 volumeBtn.addEventListener("click", function () {
   if (!muted && currentVolume > 0) lastNonZeroVolume = currentVolume;

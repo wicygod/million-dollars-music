@@ -33,6 +33,18 @@ export interface Track {
   qualityScore?: number;
   needsReview?: boolean;
   region?: string;
+  recommendationType?: string;
+  recommendationReason?: string;
+  algorithmVersion?: string;
+  recommendationPosition?: number;
+}
+
+export interface MetadataFeedSection {
+  id: string;
+  title: string;
+  subtitle?: string;
+  recommendationType?: string;
+  tracks: Track[];
 }
 
 export interface MetadataFeed {
@@ -44,6 +56,15 @@ export interface MetadataFeed {
   ru: Track[];
   global: Track[];
   all: Track[];
+  personalized?: Track[];
+  selectedArtists?: Track[];
+  similarArtists?: Track[];
+  genreRecommendations?: Track[];
+  popularForYou?: Track[];
+  exploration?: Track[];
+  sections?: MetadataFeedSection[];
+  algorithmVersion?: string;
+  personalizationActive?: boolean;
   source: MetadataProviderState;
   loadedAt: number;
   errorMessage?: string;
@@ -63,8 +84,42 @@ interface TrackSeed {
   icon: string;
 }
 
-const FEED_CACHE_KEY = "mm_metadata_feed_cache_v4";
-const FEED_TTL_MS = 45 * 60 * 1000;
+export type FeedCacheScope = string | number | null;
+
+export const HOME_FEED_CACHE_PREFIX = "mm_metadata_feed_cache_v5";
+export const HOME_FEED_CACHE_TTL_MS = 5 * 60 * 1000;
+const AUTH_USER_STORAGE_KEY = "mm_auth_user";
+
+function inferredFeedCacheScope(): FeedCacheScope {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(AUTH_USER_STORAGE_KEY);
+    if (!raw) return null;
+    const id = (JSON.parse(raw) as { id?: string | number } | null)?.id;
+    return id === undefined || id === null ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedFeedCacheScope(scope: FeedCacheScope | undefined): string {
+  const resolved = scope === undefined ? inferredFeedCacheScope() : scope;
+  const value = String(resolved ?? "guest").trim() || "guest";
+  return value === "guest" ? "guest" : `user:${encodeURIComponent(value)}`;
+}
+
+export function getHomeFeedCacheKey(scope?: FeedCacheScope): string {
+  return `${HOME_FEED_CACHE_PREFIX}:${normalizedFeedCacheScope(scope)}`;
+}
+
+export function invalidateHomeFeedCache(scope?: FeedCacheScope): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(getHomeFeedCacheKey(scope));
+  } catch {
+    /* cache invalidation is best effort */
+  }
+}
 
 export const LEGACY_TRACK_ID_MAP: Record<string, string> = {
   "6": "forss-flickermood",
@@ -547,14 +602,14 @@ function normalizeCachedTrack(track: Track, source: MetadataProviderState): Trac
   };
 }
 
-function readCachedFeed(allowStale: boolean): MetadataFeed | null {
+function readCachedFeed(allowStale: boolean, scope?: FeedCacheScope): MetadataFeed | null {
   try {
-    const raw = localStorage.getItem(FEED_CACHE_KEY);
+    const raw = localStorage.getItem(getHomeFeedCacheKey(scope));
     if (!raw) return null;
     const cached = JSON.parse(raw) as MetadataFeed;
     if (!cached?.all?.length || typeof cached.loadedAt !== "number") return null;
     if (!cached.all.every(isTrustedCachedTrack)) return null;
-    if (!allowStale && Date.now() - cached.loadedAt > FEED_TTL_MS) return null;
+    if (!allowStale && Date.now() - cached.loadedAt > HOME_FEED_CACHE_TTL_MS) return null;
     const source: MetadataProviderState = "cache";
     const normalized = cached.all.map((track) => normalizeCachedTrack(track, source));
     const normalizedById = new Map(normalized.map((track) => [track.id, track]));
@@ -564,7 +619,7 @@ function readCachedFeed(allowStale: boolean): MetadataFeed | null {
         : fallback
     );
     return {
-      recent: [],
+      recent: normalizeCollection(cached.recent, []),
       random: normalizeCollection(cached.random, normalized.slice(0, 24)),
       trending: normalizeCollection(cached.trending, normalized.slice(0, 12)),
       top: normalizeCollection(cached.top, normalized.slice(0, 12)),
@@ -572,6 +627,18 @@ function readCachedFeed(allowStale: boolean): MetadataFeed | null {
       ru: normalizeCollection(cached.ru, normalized.filter((track) => track.region === "ru").slice(0, 12)),
       global: normalizeCollection(cached.global, normalized.filter((track) => track.region === "global").slice(0, 12)),
       all: normalized,
+      personalized: normalizeCollection(cached.personalized, []),
+      selectedArtists: normalizeCollection(cached.selectedArtists, []),
+      similarArtists: normalizeCollection(cached.similarArtists, []),
+      genreRecommendations: normalizeCollection(cached.genreRecommendations, []),
+      popularForYou: normalizeCollection(cached.popularForYou, []),
+      exploration: normalizeCollection(cached.exploration, []),
+      sections: (cached.sections || []).map((section) => ({
+        ...section,
+        tracks: normalizeCollection(section.tracks, []),
+      })),
+      algorithmVersion: cached.algorithmVersion,
+      personalizationActive: cached.personalizationActive,
       source,
       loadedAt: cached.loadedAt,
       // Connectivity notices are transient and should never be restored from an old cache entry.
@@ -582,27 +649,27 @@ function readCachedFeed(allowStale: boolean): MetadataFeed | null {
   }
 }
 
-function writeCachedFeed(feed: MetadataFeed) {
+function writeCachedFeed(feed: MetadataFeed, scope?: FeedCacheScope) {
   try {
-    localStorage.setItem(FEED_CACHE_KEY, JSON.stringify({ ...feed, source: "cache" }));
+    localStorage.setItem(getHomeFeedCacheKey(scope), JSON.stringify({ ...feed, source: "cache" }));
   } catch {
     /* cache is optional */
   }
 }
 
-export function getInitialMetadataFeed(): MetadataFeed {
-  return readCachedFeed(false) || fallbackFeed();
+export function getInitialMetadataFeed(scope?: FeedCacheScope): MetadataFeed {
+  return readCachedFeed(false, scope) || fallbackFeed();
 }
 
-export async function loadHomeFeed(): Promise<MetadataFeed> {
+export async function loadHomeFeed(scope?: FeedCacheScope): Promise<MetadataFeed> {
   try {
     const feed = mapBackendFeed(await getBackendHomeFeed(), "backend");
     if (feed.all.length > 0) {
-      writeCachedFeed(feed);
+      writeCachedFeed(feed, scope);
       return feed;
     }
   } catch {
-    const cached = readCachedFeed(true);
+    const cached = readCachedFeed(true, scope);
     if (cached) {
       return {
         ...cached,

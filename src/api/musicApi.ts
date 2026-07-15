@@ -1,4 +1,5 @@
 import type { MetadataFeed, MetadataProviderState, Track } from "../metadataFeedService";
+import type { PlaybackSessionEvent } from "../features/playbackSession";
 
 export const API_BASE_URL = import.meta.env.VITE_MUSIC_API_BASE_URL?.trim() || "http://5.181.21.13:8000";
 export const APP_AUTH_TOKEN = import.meta.env.VITE_MUSIC_APP_TOKEN?.trim() || "";
@@ -10,11 +11,11 @@ const API_REQUEST_TIMEOUT_MS = 12000;
 
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = API_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } finally {
-    window.clearTimeout(timeout);
+    globalThis.clearTimeout(timeout);
   }
 }
 
@@ -24,6 +25,7 @@ export interface AuthUser {
   nickname: string;
   avatar_url?: string | null;
   subscription_status: string;
+  music_preferences_completed_at?: string | null;
   created_at: string;
   is_banned?: boolean;
 }
@@ -45,6 +47,51 @@ export interface BackendArtist extends BackendArtistSummary {
   track_count?: number;
 }
 
+export interface OnboardingArtist {
+  id: number;
+  name: string;
+  avatarUrl: string | null;
+  genres: string[];
+  popularityScore: number;
+  trackCount: number;
+  selected: boolean;
+}
+
+export interface OnboardingArtistsQuery {
+  search?: string;
+  page?: number;
+  cursor?: string;
+  limit?: number;
+  genre?: string;
+}
+
+export interface OnboardingArtistsPage {
+  items: OnboardingArtist[];
+  total: number;
+  page: number;
+  limit: number;
+  hasMore: boolean;
+  nextCursor?: string | null;
+  minimumRequired?: number;
+}
+
+export type MusicPreferenceSource = "onboarding" | "settings";
+
+export interface UserArtistPreference {
+  artistId: number;
+  source: string;
+  explicitSelected: boolean;
+  isHidden: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MusicPreferences {
+  completedAt: string | null;
+  selectedArtistIds: number[];
+  items: UserArtistPreference[];
+}
+
 export interface BackendTrack {
   id: number | string;
   title?: string | null;
@@ -63,6 +110,34 @@ export interface BackendTrack {
   is_playable?: boolean | null;
   audio_src?: string | null;
   source_url?: string | null;
+  recommendation_type?: string | null;
+  recommendationType?: string | null;
+  recommendation_reason?: string | null;
+  recommendationReason?: string | null;
+  reason?: string | null;
+  algorithm_version?: string | null;
+  algorithmVersion?: string | null;
+  position?: number | null;
+}
+
+export interface BackendFeedSection {
+  id: string;
+  title: string;
+  subtitle?: string | null;
+  tracks?: BackendTrack[];
+  items?: BackendTrack[];
+  recommendation_type?: string | null;
+  recommendationType?: string | null;
+}
+
+export interface BackendRecommendationTrack {
+  track: BackendTrack;
+  recommendation_type?: string | null;
+  recommendationType?: string | null;
+  reason?: string | null;
+  algorithm_version?: string | null;
+  algorithmVersion?: string | null;
+  position?: number | null;
 }
 
 export interface BackendHomeFeed {
@@ -71,6 +146,24 @@ export interface BackendHomeFeed {
   trending?: BackendTrack[];
   ru?: BackendTrack[];
   global?: BackendTrack[];
+  top?: BackendTrack[];
+  mood?: BackendTrack[];
+  personalized?: Array<BackendTrack | BackendRecommendationTrack>;
+  recommendations?: Array<BackendTrack | BackendRecommendationTrack>;
+  selected_artists?: BackendTrack[];
+  selectedArtists?: BackendTrack[];
+  similar_artists?: BackendTrack[];
+  similarArtists?: BackendTrack[];
+  genre_recommendations?: BackendTrack[];
+  genreRecommendations?: BackendTrack[];
+  popular_for_you?: BackendTrack[];
+  popularForYou?: BackendTrack[];
+  exploration?: BackendTrack[];
+  sections?: BackendFeedSection[];
+  algorithm_version?: string | null;
+  algorithmVersion?: string | null;
+  personalization_active?: boolean;
+  personalizationActive?: boolean;
 }
 
 export interface HistorySummary {
@@ -84,8 +177,92 @@ export interface BackendFavorite {
   created_at: string;
 }
 
+export interface ListeningEventResponse {
+  id: number;
+  eventId: string;
+  trackId: number;
+  artistId: number | null;
+  startedAt: string;
+  listenedDuration: number;
+  trackDuration: number | null;
+  completionRatio: number | null;
+  completed: boolean;
+  skipped: boolean;
+  context: string;
+  recommendationType: string | null;
+  recommendationReason: string | null;
+  algorithmVersion: string | null;
+  createdAt: string;
+}
+
+export type MusicSignalType =
+  | "like"
+  | "unlike"
+  | "playlist"
+  | "playlist_remove"
+  | "follow"
+  | "artist_view"
+  | "hide"
+  | "unhide";
+
+export interface MusicSignalInput {
+  eventId?: string;
+  signal: MusicSignalType;
+  trackId: string | number;
+  artistId?: string | number | null;
+  context?: string;
+  occurredAt?: string;
+}
+
+export interface MusicSignalResponse {
+  eventId: string;
+  signal: MusicSignalType;
+  created: boolean;
+}
+
+export type RecommendationEventType =
+  | "recommendation_impression"
+  | "recommendation_played"
+  | "recommendation_skipped"
+  | "recommendation_liked";
+
+export interface FeedEventInput {
+  eventId?: string;
+  trackId: string | number;
+  eventType: RecommendationEventType;
+  position?: number | null;
+  recommendationType?: string;
+  reason?: string | null;
+  algorithmVersion?: string;
+  context?: string;
+}
+
+export interface FeedEventResponse extends Required<Omit<FeedEventInput, "position" | "reason">> {
+  id: number;
+  position: number | null;
+  reason: string | null;
+  createdAt: string;
+}
+
 function fallbackUuid(): string {
   return `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function clientEventId(prefix: string): string {
+  const uuid = typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `${prefix}-${uuid}`;
+}
+
+function positiveInteger(value: string | number, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new TypeError(`${field} must be a positive integer`);
+  return parsed;
+}
+
+function optionalPositiveInteger(value: string | number | null | undefined, field: string): number | null {
+  return value === null || value === undefined ? null : positiveInteger(value, field);
 }
 
 export function getDeviceId(): string {
@@ -110,7 +287,8 @@ function apiHeaders(): HeadersInit {
 }
 
 export function withAppToken(url: string): string {
-  const parsed = new URL(url, window.location.href);
+  const base = typeof window === "undefined" ? API_BASE_URL : window.location.href;
+  const parsed = new URL(url, base);
   parsed.searchParams.set("app_token", APP_AUTH_TOKEN);
   return parsed.toString();
 }
@@ -140,6 +318,25 @@ export function setAdminSessionKey(value: string): void {
 async function apiFetch<T>(path: string): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     headers: apiHeaders(),
+  });
+  if (!response.ok) {
+    handleUnauthorizedResponse(response.status);
+    throw new Error(`Backend request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function apiSend<T>(
+  path: string,
+  body: unknown,
+  method: "POST" | "PATCH" = "POST",
+  options: { keepalive?: boolean } = {},
+): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
+    method,
+    headers: { ...apiHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    keepalive: options.keepalive,
   });
   if (!response.ok) {
     handleUnauthorizedResponse(response.status);
@@ -251,6 +448,87 @@ export async function updateAvatar(avatarDataUrl: string): Promise<AuthUser> {
   return user;
 }
 
+type WireOnboardingArtist = {
+  id: number;
+  name: string;
+  avatarUrl?: string | null;
+  avatar_url?: string | null;
+  genres?: string[];
+  popularityScore?: number;
+  popularity_score?: number;
+  trackCount?: number;
+  track_count?: number;
+  selected?: boolean;
+};
+
+function normalizeOnboardingArtist(artist: WireOnboardingArtist): OnboardingArtist {
+  return {
+    id: positiveInteger(artist.id, "artistId"),
+    name: String(artist.name || "Неизвестный артист"),
+    avatarUrl: resolveBackendImageUrl(artist.avatarUrl ?? artist.avatar_url),
+    genres: Array.isArray(artist.genres) ? [...new Set(artist.genres.map(String).map((genre) => genre.trim()).filter(Boolean))] : [],
+    popularityScore: Number(artist.popularityScore ?? artist.popularity_score ?? 0) || 0,
+    trackCount: Math.max(0, Math.floor(Number(artist.trackCount ?? artist.track_count ?? 0) || 0)),
+    selected: Boolean(artist.selected),
+  };
+}
+
+export async function getOnboardingArtists(query: OnboardingArtistsQuery = {}): Promise<OnboardingArtistsPage> {
+  const params = new URLSearchParams();
+  const search = query.search?.trim();
+  const genre = query.genre?.trim();
+  const cursor = query.cursor?.trim();
+  if (search) params.set("search", search);
+  if (genre) params.set("genre", genre);
+  if (cursor) params.set("cursor", cursor);
+  if (query.page !== undefined) params.set("page", String(Math.max(1, Math.floor(query.page))));
+  if (query.limit !== undefined) params.set("limit", String(Math.max(1, Math.min(100, Math.floor(query.limit)))));
+  const suffix = params.size ? `?${params.toString()}` : "";
+  const payload = await apiFetch<{
+    items?: WireOnboardingArtist[];
+    total?: number;
+    page?: number;
+    limit?: number;
+    hasMore?: boolean;
+    has_more?: boolean;
+    nextCursor?: string | null;
+    next_cursor?: string | null;
+    minimumRequired?: number;
+    minimum_required?: number;
+  }>(`/api/artists/onboarding${suffix}`);
+  return {
+    items: (payload.items || []).map(normalizeOnboardingArtist),
+    total: Math.max(0, Math.floor(Number(payload.total ?? 0) || 0)),
+    page: Math.max(1, Math.floor(Number(payload.page ?? query.page ?? 1) || 1)),
+    limit: Math.max(1, Math.floor(Number(payload.limit ?? query.limit ?? 24) || 24)),
+    hasMore: Boolean(payload.hasMore ?? payload.has_more),
+    nextCursor: payload.nextCursor ?? payload.next_cursor ?? null,
+    minimumRequired: Math.max(0, Math.floor(Number(payload.minimumRequired ?? payload.minimum_required ?? 3) || 0)),
+  };
+}
+
+export function getMusicPreferences(): Promise<MusicPreferences> {
+  return apiFetch<MusicPreferences>("/api/user/music-preferences");
+}
+
+export async function saveMusicPreferences(
+  artistIds: Iterable<string | number>,
+  source: MusicPreferenceSource = "onboarding",
+  skipped = false,
+): Promise<MusicPreferences> {
+  const normalizedIds = [...new Set([...artistIds].map((artistId) => positiveInteger(artistId, "artistId")))];
+  const preferences = await apiSend<MusicPreferences>("/api/user/music-preferences", {
+    artistIds: normalizedIds,
+    source,
+    ...(skipped ? { skipped: true } : {}),
+  });
+  const storedUser = getStoredAuthUser();
+  if (storedUser && preferences.completedAt) {
+    setStoredAuthUser({ ...storedUser, music_preferences_completed_at: preferences.completedAt });
+  }
+  return preferences;
+}
+
 export function getHomeFeed(): Promise<BackendHomeFeed> {
   return apiFetch<BackendHomeFeed>("/api/feed/home");
 }
@@ -313,6 +591,54 @@ export async function addListeningTime(seconds: number): Promise<HistorySummary>
     throw new Error(`Listening progress update failed: ${response.status}`);
   }
   return response.json() as Promise<HistorySummary>;
+}
+
+export function submitPlaybackEvent(
+  event: PlaybackSessionEvent,
+  options: { keepalive?: boolean } = {},
+): Promise<ListeningEventResponse> {
+  const completionRatio = event.completionRatio === null
+    ? null
+    : Math.max(0, Math.min(1, Number(event.completionRatio) || 0));
+  return apiSend<ListeningEventResponse>("/api/history/events", {
+    eventId: event.eventId,
+    trackId: positiveInteger(event.trackId, "trackId"),
+    artistId: optionalPositiveInteger(event.artistId, "artistId"),
+    startedAt: event.startedAt,
+    listenedDuration: Math.max(0, Math.min(86_400, Math.round(event.listenedDuration))),
+    trackDuration: event.trackDuration === null ? null : Math.max(0, Math.min(86_400, Math.round(event.trackDuration))),
+    completionRatio,
+    completed: event.completed,
+    skipped: event.skipped,
+    context: event.context.trim() || "unknown",
+    recommendationType: event.recommendationType?.trim() || null,
+    recommendationReason: event.recommendationReason?.trim() || null,
+    algorithmVersion: event.algorithmVersion?.trim() || null,
+  }, "POST", options);
+}
+
+export function postMusicSignal(input: MusicSignalInput): Promise<MusicSignalResponse> {
+  return apiSend<MusicSignalResponse>("/api/user/music-signals", {
+    eventId: input.eventId?.trim() || clientEventId("signal"),
+    signal: input.signal,
+    trackId: positiveInteger(input.trackId, "trackId"),
+    artistId: optionalPositiveInteger(input.artistId, "artistId"),
+    context: input.context?.trim() || "unknown",
+    occurredAt: input.occurredAt || new Date().toISOString(),
+  });
+}
+
+export function postFeedEvent(input: FeedEventInput): Promise<FeedEventResponse> {
+  return apiSend<FeedEventResponse>("/api/feed/events", {
+    eventId: input.eventId?.trim() || clientEventId("feed"),
+    trackId: positiveInteger(input.trackId, "trackId"),
+    eventType: input.eventType,
+    position: input.position === null || input.position === undefined ? null : Math.max(0, Math.floor(input.position)),
+    recommendationType: input.recommendationType?.trim() || "unknown",
+    reason: input.reason?.trim() || null,
+    algorithmVersion: input.algorithmVersion?.trim() || "v1",
+    context: input.context?.trim() || "home",
+  });
 }
 
 export interface PreparedTrack {
@@ -397,6 +723,16 @@ function gradientForGenre(genre: string): string {
   return map[genre] || "from-slate-600 to-zinc-950";
 }
 
+export function resolveBackendImageUrl(value: string | null | undefined): string | null {
+  const clean = value?.trim();
+  if (!clean || clean.startsWith("/static/covers/demo-")) return null;
+  if (/^data:image\/(?:png|jpe?g|webp|gif|avif);base64,/i.test(clean)) return clean;
+  if (/^https?:\/\//i.test(clean)) return clean;
+  if (clean.startsWith("/api/images/proxy")) return withAppToken(`${API_BASE_URL}${clean}`);
+  if (clean.startsWith("/")) return `${API_BASE_URL}${clean}`;
+  return null;
+}
+
 function resolveBackendUrl(value: string | null | undefined): string | null {
   if (!value) return null;
   if (value.startsWith("/static/covers/demo-")) return null;
@@ -434,7 +770,7 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
     album: track.album_name || track.album || genre,
     duration,
     durationLabel: formatDuration(duration),
-    coverUrl: resolveBackendUrl(track.cover_url),
+    coverUrl: resolveBackendImageUrl(track.cover_url),
     genre,
     tags,
     isPlayable,
@@ -450,7 +786,28 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
     qualityScore: typeof track.quality_score === "number" ? track.quality_score : undefined,
     needsReview: Boolean(track.needs_review),
     region,
+    recommendationType: track.recommendationType || track.recommendation_type || undefined,
+    recommendationReason: track.recommendationReason || track.recommendation_reason || track.reason || undefined,
+    algorithmVersion: track.algorithmVersion || track.algorithm_version || undefined,
+    recommendationPosition: typeof track.position === "number" && track.position >= 0 ? Math.floor(track.position) : undefined,
   };
+}
+
+function mapBackendRecommendationTrack(
+  item: BackendTrack | BackendRecommendationTrack,
+  providerState: MetadataProviderState,
+  position: number,
+): Track {
+  if (!("track" in item)) {
+    return mapBackendTrack({ ...item, position: item.position ?? position }, providerState);
+  }
+  return mapBackendTrack({
+    ...item.track,
+    recommendationType: item.recommendationType || item.recommendation_type || item.track.recommendationType || item.track.recommendation_type,
+    recommendationReason: item.reason || item.track.recommendationReason || item.track.recommendation_reason || item.track.reason,
+    algorithmVersion: item.algorithmVersion || item.algorithm_version || item.track.algorithmVersion || item.track.algorithm_version,
+    position: item.position ?? item.track.position ?? position,
+  }, providerState);
 }
 
 export function mapBackendFeed(feed: BackendHomeFeed, providerState: MetadataProviderState = "backend"): MetadataFeed {
@@ -459,17 +816,57 @@ export function mapBackendFeed(feed: BackendHomeFeed, providerState: MetadataPro
   const trending = uniqueTracks((feed.trending || []).map((track) => mapBackendTrack(track, providerState)));
   const ru = (feed.ru || []).map((track) => mapBackendTrack(track, providerState));
   const global = (feed.global || []).map((track) => mapBackendTrack(track, providerState));
-  const all = uniqueTracks([...recent, ...random, ...trending, ...ru, ...global]);
+  const top = uniqueTracks((feed.top || feed.trending || []).map((track) => mapBackendTrack(track, providerState)));
+  const mood = uniqueTracks((feed.mood || []).map((track) => mapBackendTrack(track, providerState)));
+  const personalized = uniqueTracks((feed.personalized || feed.recommendations || []).map((item, index) => mapBackendRecommendationTrack(item, providerState, index)));
+  const selectedArtists = uniqueTracks((feed.selectedArtists || feed.selected_artists || []).map((track) => mapBackendTrack(track, providerState)));
+  const similarArtists = uniqueTracks((feed.similarArtists || feed.similar_artists || []).map((track) => mapBackendTrack(track, providerState)));
+  const genreRecommendations = uniqueTracks((feed.genreRecommendations || feed.genre_recommendations || []).map((track) => mapBackendTrack(track, providerState)));
+  const popularForYou = uniqueTracks((feed.popularForYou || feed.popular_for_you || []).map((track) => mapBackendTrack(track, providerState)));
+  const exploration = uniqueTracks((feed.exploration || []).map((track) => mapBackendTrack(track, providerState)));
+  const sections = (feed.sections || []).map((section) => ({
+    id: section.id,
+    title: section.title,
+    subtitle: section.subtitle || undefined,
+    recommendationType: section.recommendationType || section.recommendation_type || undefined,
+    tracks: uniqueTracks((section.tracks || section.items || []).map((track) => mapBackendTrack(track, providerState))),
+  }));
+  const sectionTracks = sections.flatMap((section) => section.tracks);
+  const all = uniqueTracks([
+    ...recent,
+    ...personalized,
+    ...selectedArtists,
+    ...similarArtists,
+    ...genreRecommendations,
+    ...popularForYou,
+    ...exploration,
+    ...sectionTracks,
+    ...random,
+    ...trending,
+    ...top,
+    ...mood,
+    ...ru,
+    ...global,
+  ]);
 
   return {
     recent,
     random,
     trending,
-    top: trending,
-    mood: [...ru, ...global].slice(0, 24),
+    top: top.length ? top : trending,
+    mood: mood.length ? mood : [...ru, ...global].slice(0, 24),
     ru,
     global,
     all,
+    personalized,
+    selectedArtists,
+    similarArtists,
+    genreRecommendations,
+    popularForYou,
+    exploration,
+    sections,
+    algorithmVersion: feed.algorithmVersion || feed.algorithm_version || undefined,
+    personalizationActive: Boolean(feed.personalizationActive ?? feed.personalization_active),
     source: providerState,
     loadedAt: Date.now(),
   };
