@@ -1590,17 +1590,22 @@ function renderHomeTrackRail(title: string, items: Track[], showRecommendationRe
         <span class="text-xs text-white/35">${items.length}</span>
       </div>
       <div class="home-compact-rail">
-        ${items.map((t, index) => `
-          <div class="home-compact-card group cursor-pointer" data-id="${t.id}"${showRecommendationReason ? ` data-recommendation-position="${index}"` : ""}>
-            ${renderCover(t, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}
-            <div class="min-w-0 flex-1">
-              <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
-              <p class="text-xs text-white/40 truncate">${escapeHtml(showRecommendationReason && t.recommendationReason ? t.recommendationReason : t.artist)}</p>
+        ${items.map((t, index) => {
+          const secondaryText = showRecommendationReason && t.recommendationReason
+            ? t.recommendationReason
+            : t.artist;
+          return `
+            <div class="home-compact-card group cursor-pointer" data-id="${t.id}"${showRecommendationReason ? ` data-recommendation-position="${index}"` : ""}>
+              ${renderCover(t, "w-12 h-12 rounded-lg shrink-0 flex items-center justify-center text-sm")}
+              <div class="min-w-0 flex-1">
+                <p class="track-title-selectable text-sm font-medium truncate">${escapeHtml(t.title)}</p>
+                <p class="text-xs text-white/40 truncate" title="${escapeHtml(secondaryText)}">${escapeHtml(secondaryText)}</p>
+              </div>
+              ${renderCardTrackActions(t)}
+              <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
             </div>
-            ${renderCardTrackActions(t)}
-            <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
-          </div>
-        `).join("")}
+          `;
+        }).join("")}
       </div>
     </section>
   `;
