@@ -1,8 +1,8 @@
-﻿import { LEGACY_TRACK_ID_MAP, getInitialMetadataFeed, loadHomeFeed, type MetadataFeed, type Track } from "./metadataFeedService";
+import { LEGACY_TRACK_ID_MAP, getInitialMetadataFeed, loadHomeFeed, type MetadataFeed, type Track } from "./metadataFeedService";
 import { EqualizerEngine, DEFAULT_EQUALIZER, EQUALIZER_STATE_VERSION, EQ_FREQUENCIES, EQ_PRESETS, calculateEqualizerMetrics, equalizerCurvePoints, equalizerDisplayGains, formatEqFrequency, formatEqGain, restoreEqualizerState, type EqualizerPreset, type EqualizerPresetId, type EqualizerState } from "./features/equalizer";
 import { invalidateHomeFeedCache } from "./metadataFeedService";
 import { applyHistorySummaryToProfile, pluralizeTracks } from "./features/profile";
-import { filterLocalSearchTracks, highlightMatch } from "./features/search";
+import { filterLocalSearchTracks, highlightMatch, searchResultsSignature } from "./features/search";
 import { ACCENT_COLORS, DEFAULT_SETTINGS, settingSwitch, type PlayerSettings } from "./features/settings";
 import { PlaybackCycleGate } from "./features/playbackHistory";
 import {
@@ -3581,14 +3581,21 @@ function renderSearchResults(container: HTMLElement, query: string) {
   const q = query.toLowerCase().trim();
   const searchToken = ++searchRequestToken;
   const searchTargetLimit = 150;
+  let canonicalArtist: OnboardingArtist | null = null;
+  let visibleItems: Track[] = [];
+  let visibleMessage = "";
+  let hasRenderedResults = false;
   const isCurrentSearch = () => currentPage === "search" && currentPageParam === query && searchToken === searchRequestToken;
   const localResults = () => filterLocalSearchTracks(tracks, q);
   const renderBackendResults = (items: Track[], message = "") => {
     if (!isCurrentSearch()) return;
-    if (items.length === 0) {
+    visibleItems = items;
+    visibleMessage = message;
+    hasRenderedResults = true;
+    if (items.length === 0 && !canonicalArtist) {
       container.innerHTML = `
         <div class="flex flex-col items-center justify-center py-16">
-          <div class="text-5xl mb-4">🔍</div>
+          <div class="search-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></svg></div>
           <h2 class="text-lg font-semibold mb-2">Ничего не найдено</h2>
           <p class="text-sm text-white/40">По запросу «${escapeHtml(query)}» ничего не найдено.</p>
           ${message ? `<p class="backend-status mt-5">${escapeHtml(message)}</p>` : ""}
@@ -3596,13 +3603,54 @@ function renderSearchResults(container: HTMLElement, query: string) {
       `;
       return;
     }
+    const bestTrack = items[0];
+    const artistImageUrl = canonicalArtist ? resolveBackendImageUrl(canonicalArtist.avatarUrl) : null;
+    const artistMeta = canonicalArtist
+      ? canonicalArtist.genres.slice(0, 2).join(" · ")
+        || (canonicalArtist.popularityScore > 0
+          ? `${new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 }).format(canonicalArtist.popularityScore)} подписчиков`
+          : `${canonicalArtist.trackCount} треков`)
+      : "";
+    const bestMatchMarkup = bestTrack ? `
+      <section class="search-match-section" aria-labelledby="searchBestTitle">
+        <h2 id="searchBestTitle">Лучшее совпадение</h2>
+        <button class="search-best-match" data-best-track-id="${bestTrack.id}" type="button" aria-label="Воспроизвести: ${escapeHtml(bestTrack.title)}">
+          ${renderCover(bestTrack, "search-best-cover flex items-center justify-center", "text-xl")}
+          <span class="search-match-copy">
+            <small>Трек</small>
+            <strong class="track-title-selectable">${highlightMatch(bestTrack.title, q)}</strong>
+            <span>${highlightMatch(bestTrack.artist, q)}</span>
+          </span>
+          <span class="search-match-play" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8.5 6.8v10.4a1 1 0 0 0 1.53.85l7.7-5.2a1 1 0 0 0 0-1.7l-7.7-5.2a1 1 0 0 0-1.53.85Z"/></svg></span>
+        </button>
+      </section>
+    ` : "";
+    const artistMatchMarkup = canonicalArtist ? `
+      <section class="search-match-section" aria-labelledby="searchArtistTitle">
+        <h2 id="searchArtistTitle">Исполнитель</h2>
+        <button class="search-artist-match" data-search-artist-id="${canonicalArtist.id}" type="button" aria-label="Открыть исполнителя: ${escapeHtml(canonicalArtist.name)}">
+          <span class="search-artist-avatar">
+            <span>${escapeHtml(artistInitials(canonicalArtist.name))}</span>
+            ${artistImageUrl ? `<img src="${escapeHtml(artistImageUrl)}" alt="" loading="lazy" decoding="async" />` : ""}
+          </span>
+          <span class="search-match-copy">
+            <small>Проверенный профиль каталога</small>
+            <strong>${highlightMatch(canonicalArtist.name, q)}</strong>
+            <span>${escapeHtml(artistMeta)}</span>
+          </span>
+          <span class="search-match-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m9 6 6 6-6 6"/></svg></span>
+        </button>
+      </section>
+    ` : "";
     container.innerHTML = `
       ${message ? `<div class="backend-status mb-4">${escapeHtml(message)}</div>` : ""}
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-base font-semibold tracking-wide">Результаты поиска</h2>
-        <span class="text-xs text-white/40">${items.length} треков</span>
+      <div class="search-hybrid-grid">${bestMatchMarkup}${artistMatchMarkup}</div>
+      ${items.length ? `
+      <div class="search-track-heading">
+        <div><span>Каталог</span><h2>Треки</h2></div>
+        <span>${items.length} треков</span>
       </div>
-      <div class="space-y-1">
+      <div class="space-y-1 search-track-list">
         ${items.map((t, i) => `
           <div class="search-track group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99]" data-id="${t.id}">
             <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
@@ -3620,8 +3668,19 @@ function renderSearchResults(container: HTMLElement, query: string) {
             <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
           </div>
         `).join("")}
-      </div>
+      </div>` : ""}
     `;
+    container.querySelector<HTMLElement>("[data-best-track-id]")?.addEventListener("click", (event) => {
+      const id = getElementTrackId(event.currentTarget as HTMLElement, "data-best-track-id");
+      if (id) activateTrack(items, id);
+    });
+    container.querySelector<HTMLButtonElement>("[data-search-artist-id]")?.addEventListener("click", (event) => {
+      const artistId = (event.currentTarget as HTMLButtonElement).dataset.searchArtistId;
+      if (artistId) switchPage("artist", artistId);
+    });
+    container.querySelector<HTMLImageElement>(".search-artist-avatar img")?.addEventListener("error", (event) => {
+      (event.currentTarget as HTMLImageElement).remove();
+    }, { once: true });
     container.querySelectorAll<HTMLElement>(".search-track").forEach((el) => {
       el.addEventListener("click", () => {
         const id = getElementTrackId(el);
@@ -3648,19 +3707,20 @@ function renderSearchResults(container: HTMLElement, query: string) {
   };
   const mapSearchResults = (backendTracks: Awaited<ReturnType<typeof searchCatalog>>) =>
     mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
-  const pollHydratedResults = (attempt: number, previousCount: number, stableCount = 0) => {
-    if (attempt > 6 || previousCount >= searchTargetLimit || stableCount >= 3) return;
+  const pollHydratedResults = (attempt: number, previousSignature: string, stableCount = 0) => {
+    if (attempt > 6 || stableCount >= 3) return;
     window.setTimeout(() => {
       if (!isCurrentSearch()) return;
       searchCatalog(query, searchTargetLimit)
         .then((backendTracks) => {
           if (!isCurrentSearch()) return;
           const items = mapSearchResults(backendTracks);
-          const nextCount = items.length;
-          if (nextCount > previousCount) renderBackendResults(items);
-          const nextStableCount = nextCount > previousCount ? 0 : stableCount + 1;
-          if (nextCount < searchTargetLimit) {
-            pollHydratedResults(attempt + 1, Math.max(previousCount, nextCount), nextStableCount);
+          const nextSignature = searchResultsSignature(items);
+          const changed = nextSignature !== previousSignature;
+          if (changed) renderBackendResults(items);
+          const nextStableCount = changed ? 0 : stableCount + 1;
+          if (items.length < searchTargetLimit) {
+            pollHydratedResults(attempt + 1, nextSignature, nextStableCount);
           }
         })
         .catch(() => {});
@@ -3676,6 +3736,13 @@ function renderSearchResults(container: HTMLElement, query: string) {
       </div>
     </div>
   `;
+  void getOnboardingArtists({ search: query, page: 1, limit: 1 })
+    .then((response) => {
+      if (!isCurrentSearch()) return;
+      canonicalArtist = response.items[0] ?? null;
+      if (hasRenderedResults) renderBackendResults(visibleItems, visibleMessage);
+    })
+    .catch(() => { /* Track search remains fully usable without an artist match. */ });
   const showSavedSearchResults = () => {
     if (!isCurrentSearch()) return;
     renderBackendResults(localResults(), "Каталог временно недоступен. Показаны сохранённые результаты.");
@@ -3687,7 +3754,7 @@ function renderSearchResults(container: HTMLElement, query: string) {
       if (!isCurrentSearch()) return;
       const items = mapSearchResults(backendTracks);
       renderBackendResults(items);
-      pollHydratedResults(1, items.length);
+      pollHydratedResults(1, searchResultsSignature(items));
     })
     .catch(() => {
       window.clearTimeout(searchFallbackTimer);
