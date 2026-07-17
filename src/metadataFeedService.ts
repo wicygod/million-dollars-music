@@ -8,6 +8,10 @@ export interface ArtistSummary {
   name: string;
   avatar_url?: string | null;
   region?: string | null;
+  is_canonical?: boolean;
+  source_verified?: boolean;
+  source_followers_count?: number;
+  needs_review?: boolean;
 }
 
 export interface Track {
@@ -31,6 +35,8 @@ export interface Track {
   artists?: ArtistSummary[];
   artistId?: string;
   qualityScore?: number;
+  popularityScore?: number;
+  artistAuthorityScore?: number;
   needsReview?: boolean;
   region?: string;
   recommendationType?: string;

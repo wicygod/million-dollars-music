@@ -32,11 +32,16 @@ async function responseError(response: Response): Promise<ApiRequestError> {
 
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = API_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
+  const externalSignal = init.signal;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } finally {
     globalThis.clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
 
@@ -98,6 +103,10 @@ export interface BackendArtistSummary {
   name: string;
   avatar_url?: string | null;
   region?: string | null;
+  is_canonical?: boolean;
+  source_verified?: boolean;
+  source_followers_count?: number;
+  needs_review?: boolean;
 }
 
 export interface BackendArtist extends BackendArtistSummary {
@@ -121,6 +130,7 @@ export interface OnboardingArtistsQuery {
   cursor?: string;
   limit?: number;
   genre?: string;
+  signal?: AbortSignal;
 }
 
 export interface OnboardingArtistsPage {
@@ -157,6 +167,8 @@ export interface BackendTrack {
   artists?: BackendArtistSummary[];
   album?: string | null;
   album_name?: string | null;
+  album_id?: number | string | null;
+  album_track_number?: number | null;
   duration_seconds?: number | null;
   cover_url?: string | null;
   genre?: string | null;
@@ -176,6 +188,29 @@ export interface BackendTrack {
   algorithm_version?: string | null;
   algorithmVersion?: string | null;
   position?: number | null;
+}
+
+export interface BackendAlbum {
+  id: number | string;
+  title: string;
+  album_type?: string | null;
+  cover_url?: string | null;
+  release_date?: string | null;
+  track_count?: number | null;
+  artist: BackendArtistSummary;
+  source_name?: string | null;
+  source_url?: string | null;
+  popularity_score?: number | null;
+  is_available?: boolean;
+  matched_track_id?: number | string | null;
+  tracks: BackendTrack[];
+}
+
+export interface BackendSearchOverview {
+  tracks: BackendTrack[];
+  albums: BackendAlbum[];
+  refresh_pending?: boolean;
+  legacy_fallback?: boolean;
 }
 
 export interface BackendFeedSection {
@@ -373,13 +408,14 @@ export function setAdminSessionKey(value: string): void {
   else sessionStorage.removeItem(ADMIN_SESSION_KEY);
 }
 
-async function apiFetch<T>(path: string): Promise<T> {
+async function apiFetch<T>(path: string, options: { signal?: AbortSignal } = {}): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     headers: apiHeaders(),
+    signal: options.signal,
   });
   if (!response.ok) {
     handleUnauthorizedResponse(response.status);
-    throw new Error(`Backend request failed: ${response.status}`);
+    throw await responseError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -635,7 +671,7 @@ export async function getOnboardingArtists(query: OnboardingArtistsQuery = {}): 
     next_cursor?: string | null;
     minimumRequired?: number;
     minimum_required?: number;
-  }>(`/api/artists/onboarding${suffix}`);
+  }>(`/api/artists/onboarding${suffix}`, { signal: query.signal });
   return {
     items: (payload.items || []).map(normalizeOnboardingArtist),
     total: Math.max(0, Math.floor(Number(payload.total ?? 0) || 0)),
@@ -673,8 +709,42 @@ export function getHomeFeed(): Promise<BackendHomeFeed> {
   return apiFetch<BackendHomeFeed>("/api/feed/home");
 }
 
-export function searchCatalog(query: string, limit = 150): Promise<BackendTrack[]> {
-  return apiFetch<BackendTrack[]>(`/api/search?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(limit))}`);
+export function searchCatalog(query: string, limit = 150, signal?: AbortSignal): Promise<BackendTrack[]> {
+  const boundedLimit = Math.max(1, Math.min(150, Math.floor(limit)));
+  return apiFetch<BackendTrack[]>(
+    `/api/search?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(boundedLimit))}`,
+    { signal },
+  );
+}
+
+export function searchCatalogOverview(
+  query: string,
+  limit = 150,
+  albumLimit = 3,
+  signal?: AbortSignal,
+): Promise<BackendSearchOverview> {
+  const params = new URLSearchParams({
+    q: query,
+    limit: String(Math.max(1, Math.min(150, Math.floor(limit)))),
+    album_limit: String(Math.max(1, Math.min(10, Math.floor(albumLimit)))),
+  });
+  return apiFetch<BackendSearchOverview>(`/api/search/overview?${params.toString()}`, { signal })
+    .then((payload) => ({
+      ...payload,
+      tracks: Array.isArray(payload.tracks) ? payload.tracks : [],
+      albums: Array.isArray(payload.albums) ? payload.albums : [],
+      refresh_pending: Boolean(payload.refresh_pending),
+      legacy_fallback: Boolean(payload.legacy_fallback),
+    }))
+    .catch(async (error: unknown) => {
+      if (!(error instanceof ApiRequestError) || ![404, 405, 501].includes(error.status)) throw error;
+      return {
+        tracks: await searchCatalog(query, limit, signal),
+        albums: [],
+        refresh_pending: true,
+        legacy_fallback: true,
+      };
+    });
 }
 
 export function getTrack(trackId: string | number): Promise<BackendTrack> {
@@ -687,6 +757,14 @@ export function getArtist(artistId: string | number): Promise<BackendArtist> {
 
 export function getArtistTracks(artistId: string | number): Promise<BackendTrack[]> {
   return apiFetch<BackendTrack[]>(`/api/artists/${encodeURIComponent(String(artistId))}/tracks`);
+}
+
+export function getArtistAlbums(artistId: string | number): Promise<BackendAlbum[]> {
+  return apiFetch<BackendAlbum[]>(`/api/artists/${encodeURIComponent(String(artistId))}/albums`);
+}
+
+export function getAlbum(albumId: string | number): Promise<BackendAlbum> {
+  return apiFetch<BackendAlbum>(`/api/albums/${encodeURIComponent(String(albumId))}`);
 }
 
 export async function recordTrackPlay(trackId: string | number): Promise<BackendTrack> {
@@ -919,6 +997,13 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
   const audioSrc = resolveBackendUrl(track.audio_src);
   const hasPlaybackSource = Boolean(track.audio_src || track.source_url);
   const isPlayable = Boolean((track.is_playable ?? hasPlaybackSource) && hasPlaybackSource);
+  const artistAuthorityScore = artists.reduce((best, artist) => Math.max(
+    best,
+    (artist.is_canonical ? 4 : 0)
+      + (artist.source_verified ? 3 : 0)
+      + Math.min(3, Math.log10(Math.max(1, Number(artist.source_followers_count || 0))) / 2)
+      - (artist.needs_review ? 4 : 0),
+  ), 0);
 
   return {
     id: String(track.id),
@@ -941,6 +1026,8 @@ export function mapBackendTrack(track: BackendTrack, providerState: MetadataProv
     artists,
     artistId: artists[0] ? String(artists[0].id) : undefined,
     qualityScore: typeof track.quality_score === "number" ? track.quality_score : undefined,
+    popularityScore: typeof track.popularity_score === "number" ? track.popularity_score : undefined,
+    artistAuthorityScore,
     needsReview: Boolean(track.needs_review),
     region,
     recommendationType: track.recommendationType || track.recommendation_type || undefined,

@@ -2,7 +2,15 @@ import { LEGACY_TRACK_ID_MAP, getInitialMetadataFeed, loadHomeFeed, type Metadat
 import { EqualizerEngine, DEFAULT_EQUALIZER, EQUALIZER_STATE_VERSION, EQ_FREQUENCIES, EQ_PRESETS, calculateEqualizerMetrics, equalizerCurvePoints, equalizerDisplayGains, formatEqFrequency, formatEqGain, restoreEqualizerState, type EqualizerPreset, type EqualizerPresetId, type EqualizerState } from "./features/equalizer";
 import { invalidateHomeFeedCache } from "./metadataFeedService";
 import { applyHistorySummaryToProfile, pluralizeTracks } from "./features/profile";
-import { filterLocalSearchTracks, highlightMatch, searchResultsSignature } from "./features/search";
+import {
+  filterLocalSearchTracks,
+  highlightMatch,
+  isExactArtistSearch,
+  normalizeSearchText,
+  prepareSearchTracks,
+  sanitizeSearchQuery,
+  searchResultsSignature,
+} from "./features/search";
 import { ACCENT_COLORS, DEFAULT_SETTINGS, settingSwitch, type PlayerSettings } from "./features/settings";
 import { PlaybackCycleGate } from "./features/playbackHistory";
 import {
@@ -32,6 +40,7 @@ import {
   fetchCurrentUser,
   getArtist as fetchArtist,
   getArtistTracks,
+  getArtistAlbums,
   getAuthToken,
   getHistorySummary,
   getMusicPreferences,
@@ -51,12 +60,14 @@ import {
   resolveBackendImageUrl,
   saveMusicPreferences,
   searchCatalog,
+  searchCatalogOverview,
   submitBugReport,
   submitPlaybackEvent,
   setUserFavorite,
   setStoredAuthUser,
   type AuthResponse,
   type AuthUser,
+  type BackendAlbum,
   type OnboardingArtist,
   type MockCheckout,
   type SubscriptionPlan,
@@ -879,11 +890,27 @@ let currentPage = "home";
 let currentPageParam: string | null = null;
 let currentPlaylistId: string | null = null;
 let searchRequestToken = 0;
+let activeSearchController: AbortController | null = null;
+let activeSearchFallbackTimer: number | null = null;
+let activeSearchPollTimer: number | null = null;
 let metadataFeedGeneration = 0;
 let recentScrollbarCleanup: (() => void) | null = null;
 
+function cancelActiveSearchRequests() {
+  activeSearchController?.abort();
+  activeSearchController = null;
+  if (activeSearchFallbackTimer !== null) window.clearTimeout(activeSearchFallbackTimer);
+  if (activeSearchPollTimer !== null) window.clearTimeout(activeSearchPollTimer);
+  activeSearchFallbackTimer = null;
+  activeSearchPollTimer = null;
+  searchSubmitBtn.setAttribute("aria-busy", "false");
+}
+
 function switchPage(pageId: string, extraParam: string | null = null, preserveScroll = false) {
   const content = document.getElementById("appContent")!;
+  if (currentPage === "search" && (pageId !== "search" || extraParam !== currentPageParam)) {
+    cancelActiveSearchRequests();
+  }
   recentScrollbarCleanup?.();
   recentScrollbarCleanup = null;
   recommendationImpressionObserver?.disconnect();
@@ -920,7 +947,9 @@ function switchPage(pageId: string, extraParam: string | null = null, preserveSc
   updateSidebarActiveState();
   updateActiveTrackHighlight();
   content.scrollTop = preserveScroll ? previousScrollTop : 0;
-  window.requestAnimationFrame(() => content.setAttribute("aria-busy", "false"));
+  if (pageId !== "search") {
+    window.requestAnimationFrame(() => content.setAttribute("aria-busy", "false"));
+  }
   const pageLabels: Record<string, string> = {
     home: "Главная", explore: "Обзор", favorites: "Избранное", notifications: "Уведомления",
     radio: "Радио и миксы", profile: "Профиль", settings: "Настройки", playlist: "Плейлист",
@@ -2459,10 +2488,13 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
         </div>
       </div>
     `;
-    Promise.all([fetchArtist(artistName), getArtistTracks(artistName)])
-      .then(([artist, backendTracks]) => {
+    Promise.all([fetchArtist(artistName), getArtistTracks(artistName), getArtistAlbums(artistName).catch(() => [])])
+      .then(([artist, backendTracks, artistAlbums]) => {
         if (!isCurrentArtist()) return;
         const artistTracks = mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
+        const albumTrackQueues = new Map(
+          artistAlbums.map((album) => [String(album.id), mergeTracks(album.tracks.map((track) => mapBackendTrack(track)))]),
+        );
         const primary = artistTracks[0];
         if (primary && /^\d+$/.test(String(primary.id)) && !recordedArtistViews.has(artistName)) {
           recordedArtistViews.add(artistName);
@@ -2490,6 +2522,30 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
               </div>
             </div>
           </div>
+          ${artistAlbums.length ? `
+            <section class="artist-albums-section" aria-labelledby="artistAlbumsTitle">
+              <div class="artist-section-heading">
+                <div><span>Дискография</span><h3 id="artistAlbumsTitle">Альбомы и релизы</h3></div>
+                <span>${artistAlbums.length}</span>
+              </div>
+              <div class="artist-albums-grid">
+                ${artistAlbums.map((album) => {
+                  const coverUrl = resolveBackendImageUrl(album.cover_url);
+                  const year = album.release_date ? new Date(album.release_date).getFullYear() : null;
+                  return `
+                    <button class="artist-album-card" data-artist-album-id="${escapeHtml(String(album.id))}" type="button" aria-label="Воспроизвести релиз ${escapeHtml(album.title)}">
+                      <span class="artist-album-art">
+                        <span>${escapeHtml(artistInitials(album.title))}</span>
+                        ${coverUrl ? `<img src="${escapeHtml(coverUrl)}" alt="" loading="lazy" decoding="async" />` : ""}
+                      </span>
+                      <strong>${escapeHtml(album.title)}</strong>
+                      <span>${year || "Релиз"} · ${album.track_count || album.tracks.length} треков</span>
+                    </button>
+                  `;
+                }).join("")}
+              </div>
+            </section>
+          ` : ""}
           <h3 class="text-sm font-semibold tracking-wide mb-3">Треки</h3>
           ${artistTracks.length ? `<div class="space-y-1">${artistTracks.map((t, i) => renderTrackRow(t, i, "artist-track")).join("")}</div>` : `
             <div class="playlist-empty py-16 flex flex-col items-center justify-center text-center">
@@ -2500,6 +2556,15 @@ function renderArtistPage(container: HTMLElement, artistName: string) {
         `;
         container.querySelector(".playArtistBtn")?.addEventListener("click", () => {
           if (artistTracks[0]) activateTrack(artistTracks, artistTracks[0].id);
+        });
+        container.querySelectorAll<HTMLImageElement>(".artist-album-art img").forEach((image) => {
+          image.addEventListener("error", () => image.remove(), { once: true });
+        });
+        container.querySelectorAll<HTMLButtonElement>(".artist-album-card").forEach((button) => {
+          button.addEventListener("click", () => {
+            const albumTracks = albumTrackQueues.get(button.dataset.artistAlbumId || "") || [];
+            if (albumTracks[0]) activateTrack(albumTracks, albumTracks[0].id);
+          });
         });
         wireTrackRows(container, ".artist-track", artistTracks, () => renderArtistPage(container, artistName));
       })
@@ -3577,33 +3642,149 @@ function renderGenrePage(container: HTMLElement, genreId: string | null) {
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
-function renderSearchResults(container: HTMLElement, query: string) {
-  const q = query.toLowerCase().trim();
+function renderSearchResults(container: HTMLElement, rawQuery: string) {
+  const query = sanitizeSearchQuery(rawQuery);
+  const q = normalizeSearchText(query);
+  cancelActiveSearchRequests();
+  const controller = new AbortController();
+  activeSearchController = controller;
   const searchToken = ++searchRequestToken;
   const searchTargetLimit = 150;
+  const pollBackoff = [1800, 3600, 7200, 12000, 15000];
   let canonicalArtist: OnboardingArtist | null = null;
   let visibleItems: Track[] = [];
-  let visibleMessage = "";
+  let visibleAlbums: BackendAlbum[] = [];
+  let visibleStatus: SearchRenderStatus | null = null;
   let hasRenderedResults = false;
-  const isCurrentSearch = () => currentPage === "search" && currentPageParam === query && searchToken === searchRequestToken;
-  const localResults = () => filterLocalSearchTracks(tracks, q);
-  const renderBackendResults = (items: Track[], message = "") => {
+
+  type SearchRenderStatus = {
+    message: string;
+    tone?: "info" | "error";
+    retry?: boolean;
+    pending?: boolean;
+  };
+  type SearchViewState = {
+    scrollTop: number;
+    focusKey: string | null;
+    anchorKey: string | null;
+    anchorOffset: number;
+  };
+
+  const isCurrentSearch = () => (
+    currentPage === "search"
+    && sanitizeSearchQuery(currentPageParam || "") === query
+    && searchToken === searchRequestToken
+    && !controller.signal.aborted
+  );
+  const setSearchPending = (pending: boolean) => {
     if (!isCurrentSearch()) return;
+    container.setAttribute("aria-busy", String(pending));
+    searchSubmitBtn.setAttribute("aria-busy", String(pending));
+  };
+  const captureViewState = (): SearchViewState | null => {
+    if (!hasRenderedResults) return null;
+    const active = document.activeElement instanceof HTMLElement && container.contains(document.activeElement)
+      ? document.activeElement
+      : null;
+    const containerTop = container.getBoundingClientRect().top;
+    const anchors = [...container.querySelectorAll<HTMLElement>("[data-search-anchor]")];
+    const anchor = anchors.find((element) => element.getBoundingClientRect().bottom >= containerTop + 8) ?? null;
+    return {
+      scrollTop: container.scrollTop,
+      focusKey: active?.dataset.searchFocusKey ?? null,
+      anchorKey: anchor?.dataset.searchAnchor ?? null,
+      anchorOffset: anchor ? anchor.getBoundingClientRect().top - containerTop : 0,
+    };
+  };
+  const restoreViewState = (state: SearchViewState | null) => {
+    if (!state) return;
+    container.scrollTop = state.scrollTop;
+    if (state.anchorKey) {
+      const anchor = [...container.querySelectorAll<HTMLElement>("[data-search-anchor]")]
+        .find((element) => element.dataset.searchAnchor === state.anchorKey);
+      if (anchor) {
+        const nextOffset = anchor.getBoundingClientRect().top - container.getBoundingClientRect().top;
+        container.scrollTop += nextOffset - state.anchorOffset;
+      }
+    }
+    if (state.focusKey) {
+      const focusTarget = [...container.querySelectorAll<HTMLElement>("[data-search-focus-key]")]
+        .find((element) => element.dataset.searchFocusKey === state.focusKey);
+      focusTarget?.focus({ preventScroll: true });
+    }
+  };
+  const localResults = () => filterLocalSearchTracks(tracks, query);
+  const mapAlbumTracks = (album: BackendAlbum) => {
+    const mapped = mergeTracks(album.tracks.map((track) => mapBackendTrack(track)));
+    const matchedIndex = mapped.findIndex((track) => String(track.id) === String(album.matched_track_id));
+    return matchedIndex > 0
+      ? [mapped[matchedIndex], ...mapped.slice(0, matchedIndex), ...mapped.slice(matchedIndex + 1)]
+      : mapped;
+  };
+  const albumResultsSignature = (albums: BackendAlbum[]) => JSON.stringify(albums.map((album) => ({
+    id: album.id,
+    title: album.title,
+    cover: album.cover_url,
+    available: album.is_available,
+    matched: album.matched_track_id,
+    tracks: album.tracks.map((track) => [
+      track.id,
+      track.title,
+      track.artist,
+      track.duration_seconds,
+      track.cover_url,
+      track.is_playable,
+      track.source_url,
+      track.quality_score,
+      track.needs_review,
+    ]),
+  })));
+  const renderSearchCover = (track: Track, className: string, iconClass = "") => `
+    <span class="${className} track-cover has-cover bg-gradient-to-br ${track.gradient}"${coverStyle(track)}>
+      <span class="track-cover-icon ${iconClass}">${track.icon}</span>
+    </span>
+  `;
+  const wireRetry = () => {
+    container.querySelector<HTMLButtonElement>("[data-search-retry]")?.addEventListener("click", () => {
+      renderSearchResults(container, query);
+    });
+  };
+
+  const renderBackendResults = (
+    items: Track[],
+    albums: BackendAlbum[] = visibleAlbums,
+    status: SearchRenderStatus | null = null,
+  ) => {
+    if (!isCurrentSearch()) return;
+    const viewState = captureViewState();
     visibleItems = items;
-    visibleMessage = message;
+    visibleAlbums = albums;
+    visibleStatus = status;
+    const availableAlbums = albums.filter((album) => album.is_available !== false);
+    const albumTrackQueues = new Map<string, Track[]>();
+    availableAlbums.forEach((album) => albumTrackQueues.set(String(album.id), mapAlbumTracks(album)));
     hasRenderedResults = true;
-    if (items.length === 0 && !canonicalArtist) {
+    const failed = status?.tone === "error";
+    if (items.length === 0 && availableAlbums.length === 0 && !canonicalArtist) {
       container.innerHTML = `
-        <div class="flex flex-col items-center justify-center py-16">
-          <div class="search-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></svg></div>
-          <h2 class="text-lg font-semibold mb-2">Ничего не найдено</h2>
-          <p class="text-sm text-white/40">По запросу «${escapeHtml(query)}» ничего не найдено.</p>
-          ${message ? `<p class="backend-status mt-5">${escapeHtml(message)}</p>` : ""}
+        <div class="search-empty-state" role="${failed ? "alert" : "status"}" aria-live="${failed ? "assertive" : "polite"}">
+          <div class="search-empty-icon ${failed ? "is-error" : ""}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></svg></div>
+          <h2>${failed ? "Не удалось загрузить каталог" : "Ничего не найдено"}</h2>
+          <p>${failed
+            ? "Проверьте подключение и повторите поиск. Сохранённых совпадений для этого запроса нет."
+            : `По запросу «${escapeHtml(query)}» ничего не найдено. Попробуйте другое написание или имя артиста.`}</p>
+          ${status?.retry ? `<button class="search-retry-button" data-search-retry type="button">Повторить поиск</button>` : ""}
         </div>
       `;
+      wireRetry();
+      restoreViewState(viewState);
+      setSearchPending(Boolean(status?.pending));
       return;
     }
+
+    const playableItems = items.filter(canPlayTrack);
     const bestTrack = items[0];
+    const bestTrackPlayable = canPlayTrack(bestTrack);
     const artistImageUrl = canonicalArtist ? resolveBackendImageUrl(canonicalArtist.avatarUrl) : null;
     const artistMeta = canonicalArtist
       ? canonicalArtist.genres.slice(0, 2).join(" · ")
@@ -3611,68 +3792,139 @@ function renderSearchResults(container: HTMLElement, query: string) {
           ? `${new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 }).format(canonicalArtist.popularityScore)} подписчиков`
           : `${canonicalArtist.trackCount} треков`)
       : "";
+    const statusMarkup = status ? `
+      <div class="search-result-status is-${status.tone || "info"}" role="${failed ? "alert" : "status"}">
+        <span>${escapeHtml(status.message)}</span>
+        ${status.retry ? `<button data-search-retry type="button">Повторить</button>` : ""}
+      </div>
+    ` : "";
     const bestMatchMarkup = bestTrack ? `
-      <section class="search-match-section" aria-labelledby="searchBestTitle">
+      <section class="search-match-section" aria-labelledby="searchBestTitle" data-search-anchor="best:${escapeHtml(bestTrack.id)}">
         <h2 id="searchBestTitle">Лучшее совпадение</h2>
-        <button class="search-best-match" data-best-track-id="${bestTrack.id}" type="button" aria-label="Воспроизвести: ${escapeHtml(bestTrack.title)}">
-          ${renderCover(bestTrack, "search-best-cover flex items-center justify-center", "text-xl")}
+        <button class="search-best-match ${bestTrackPlayable ? "" : "is-unavailable"}" data-best-track-id="${escapeHtml(bestTrack.id)}" data-search-focus-key="best:${escapeHtml(bestTrack.id)}" type="button" aria-label="${bestTrackPlayable ? "Воспроизвести" : "Аудио недоступно"}: ${escapeHtml(bestTrack.title)}" ${bestTrackPlayable ? "" : "disabled"}>
+          ${renderSearchCover(bestTrack, "search-best-cover flex items-center justify-center", "text-xl")}
           <span class="search-match-copy">
-            <small>Трек</small>
-            <strong class="track-title-selectable">${highlightMatch(bestTrack.title, q)}</strong>
-            <span>${highlightMatch(bestTrack.artist, q)}</span>
+            <small>${bestTrackPlayable ? "Трек" : "Трек · аудио недоступно"}</small>
+            <strong class="track-title-selectable">${highlightMatch(bestTrack.title, query)}</strong>
+            <span>${highlightMatch(bestTrack.artist, query)}</span>
           </span>
-          <span class="search-match-play" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8.5 6.8v10.4a1 1 0 0 0 1.53.85l7.7-5.2a1 1 0 0 0 0-1.7l-7.7-5.2a1 1 0 0 0-1.53.85Z"/></svg></span>
+          <span class="search-match-play" aria-hidden="true"><svg viewBox="0 0 24 24" fill="${bestTrackPlayable ? "currentColor" : "none"}" stroke="currentColor"><path d="${bestTrackPlayable ? "M8.5 6.8v10.4a1 1 0 0 0 1.53.85l7.7-5.2a1 1 0 0 0 0-1.7l-7.7-5.2a1 1 0 0 0-1.53.85Z" : "M7 7l10 10M17 7 7 17"}"/></svg></span>
         </button>
       </section>
     ` : "";
+    const canonicalArtistId = canonicalArtist ? escapeHtml(String(canonicalArtist.id)) : "";
     const artistMatchMarkup = canonicalArtist ? `
-      <section class="search-match-section" aria-labelledby="searchArtistTitle">
+      <section class="search-match-section" aria-labelledby="searchArtistTitle" data-search-anchor="artist:${canonicalArtistId}">
         <h2 id="searchArtistTitle">Исполнитель</h2>
-        <button class="search-artist-match" data-search-artist-id="${canonicalArtist.id}" type="button" aria-label="Открыть исполнителя: ${escapeHtml(canonicalArtist.name)}">
+        <button class="search-artist-match" data-search-artist-id="${canonicalArtistId}" data-search-focus-key="artist:${canonicalArtistId}" type="button" aria-label="Открыть исполнителя: ${escapeHtml(canonicalArtist.name)}">
           <span class="search-artist-avatar">
             <span>${escapeHtml(artistInitials(canonicalArtist.name))}</span>
             ${artistImageUrl ? `<img src="${escapeHtml(artistImageUrl)}" alt="" loading="lazy" decoding="async" />` : ""}
           </span>
           <span class="search-match-copy">
-            <small>Проверенный профиль каталога</small>
-            <strong>${highlightMatch(canonicalArtist.name, q)}</strong>
+            <small>Точное совпадение · профиль каталога</small>
+            <strong>${highlightMatch(canonicalArtist.name, query)}</strong>
             <span>${escapeHtml(artistMeta)}</span>
           </span>
           <span class="search-match-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m9 6 6 6-6 6"/></svg></span>
         </button>
       </section>
     ` : "";
-    container.innerHTML = `
-      ${message ? `<div class="backend-status mb-4">${escapeHtml(message)}</div>` : ""}
-      <div class="search-hybrid-grid">${bestMatchMarkup}${artistMatchMarkup}</div>
-      ${items.length ? `
-      <div class="search-track-heading">
-        <div><span>Каталог</span><h2>Треки</h2></div>
-        <span>${items.length} треков</span>
-      </div>
-      <div class="space-y-1 search-track-list">
-        ${items.map((t, i) => `
-          <div class="search-track group flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5 transition-all duration-300 cursor-pointer active:scale-[0.99]" data-id="${t.id}">
-            <span class="text-xs text-white/30 w-6 text-center">${i + 1}</span>
-            ${renderCover(t, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
-            <div class="flex-1 min-w-0">
-              <p class="track-title-selectable text-sm font-medium truncate">${highlightMatch(t.title, q)}</p>
-              <p class="text-xs text-white/40 truncate">${highlightMatch(t.artist, q)}</p>
+    const albumsMarkup = availableAlbums.map((album, albumIndex) => {
+      const albumId = escapeHtml(String(album.id));
+      const albumTracks = albumTrackQueues.get(String(album.id)) || [];
+      const playableAlbumTracks = albumTracks.filter(canPlayTrack);
+      const coverUrl = resolveBackendImageUrl(album.cover_url);
+      const releaseYear = album.release_date ? new Date(album.release_date).getFullYear() : null;
+      const typeLabel = album.album_type === "ep" ? "EP" : album.album_type === "single" ? "Сингл" : album.album_type === "compilation" ? "Сборник" : "Альбом";
+      return `
+        <section class="search-album" data-album-id="${albumId}" data-search-anchor="album:${albumId}" aria-labelledby="searchAlbumTitle${albumIndex}">
+          <div class="search-album-header">
+            <div class="search-album-cover" aria-hidden="true">
+              <span>${escapeHtml(artistInitials(album.title))}</span>
+              ${coverUrl ? `<img src="${escapeHtml(coverUrl)}" alt="" loading="lazy" decoding="async" />` : ""}
             </div>
-            <button class="search-like-btn playlist-row-btn ${t.liked ? "text-red-400 opacity-100" : "opacity-0 group-hover:opacity-100"}" data-track-id="${t.id}" type="button" title="Лайк" aria-label="${t.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(t.title)}" aria-pressed="${String(t.liked)}">
-              <svg class="w-4 h-4" fill="${t.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
-            </button>
-            <button class="search-add-btn playlist-row-btn opacity-0 group-hover:opacity-100" data-track-id="${t.id}" type="button" title="Добавить в плейлист" aria-label="Добавить в плейлист: ${escapeHtml(t.title)}">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-            </button>
-            <span class="text-xs text-white/30 tabular-nums">${t.durationLabel}</span>
+            <div class="search-album-copy">
+              <span>${typeLabel}${releaseYear ? ` · ${releaseYear}` : ""}</span>
+              <h2 id="searchAlbumTitle${albumIndex}">${highlightMatch(album.title, query)}</h2>
+              <p>${escapeHtml(album.artist.name)} · ${album.track_count || albumTracks.length} треков</p>
+            </div>
+            ${playableAlbumTracks.length ? `
+              <button class="search-album-play" data-play-album-id="${albumId}" data-search-focus-key="album-play:${albumId}" type="button" aria-label="Воспроизвести альбом ${escapeHtml(album.title)}">
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8.5 6.8v10.4a1 1 0 0 0 1.53.85l7.7-5.2a1 1 0 0 0 0-1.7l-7.7-5.2a1 1 0 0 0-1.53.85Z"/></svg>
+              </button>
+            ` : `<span class="search-album-unavailable">Аудио недоступно</span>`}
           </div>
-        `).join("")}
-      </div>` : ""}
+          ${albumTracks.length ? `
+            <div class="search-album-tracks">
+              ${albumTracks.map((track, trackIndex) => {
+                const trackId = escapeHtml(track.id);
+                const playable = canPlayTrack(track);
+                return `
+                  <div class="search-album-track group ${playable ? "" : "is-unavailable"}" data-track-album-id="${albumId}">
+                    <span class="search-album-position">${trackIndex + 1}</span>
+                    <button class="search-album-track-play" data-album-track-id="${trackId}" data-track-album-id="${albumId}" data-id="${trackId}" data-search-focus-key="album-track:${albumId}:${trackId}" type="button" aria-label="${playable ? "Воспроизвести" : "Аудио недоступно"}: ${escapeHtml(track.title)} — ${escapeHtml(track.artist)}" ${playable ? "" : "disabled"}>
+                      <span class="search-album-track-copy">
+                        <strong class="track-title-selectable">${highlightMatch(track.title, query)}</strong>
+                        <span>${escapeHtml(track.artist)}${String(track.id) === String(album.matched_track_id) ? " · Искомый трек" : ""}</span>
+                      </span>
+                    </button>
+                    <button class="search-album-like-btn playlist-row-btn ${track.liked ? "text-red-400 opacity-100" : ""}" data-track-id="${trackId}" data-search-focus-key="album-like:${albumId}:${trackId}" type="button" aria-label="${track.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(track.title)}" aria-pressed="${String(track.liked)}">
+                      <svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+                    </button>
+                    <button class="search-album-add-btn playlist-row-btn" data-track-id="${trackId}" data-search-focus-key="album-add:${albumId}:${trackId}" type="button" aria-label="Добавить в плейлист: ${escapeHtml(track.title)}">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                    </button>
+                    <span class="search-album-duration">${playable ? track.durationLabel : "—"}</span>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          ` : `<p class="search-album-empty">Треки релиза ещё загружаются</p>`}
+        </section>
+      `;
+    }).join("");
+    const trackRowsMarkup = items.map((track, index) => {
+      const trackId = escapeHtml(track.id);
+      const playable = canPlayTrack(track);
+      return `
+        <div class="search-track group ${playable ? "" : "is-unavailable"}" data-search-anchor="track:${trackId}">
+          <button class="search-track-play" data-search-track-id="${trackId}" data-id="${trackId}" data-search-focus-key="track:${trackId}" type="button" aria-label="${playable ? "Воспроизвести" : "Аудио недоступно"}: ${escapeHtml(track.title)} — ${escapeHtml(track.artist)}" ${playable ? "" : "disabled"}>
+            <span class="search-track-position">${index + 1}</span>
+            ${renderSearchCover(track, "w-10 h-10 rounded-lg shrink-0 flex items-center justify-center text-sm")}
+            <span class="search-track-copy">
+              <strong class="track-title-selectable">${highlightMatch(track.title, query)}</strong>
+              <span>${highlightMatch(track.artist, query)}</span>
+            </span>
+          </button>
+          <button class="search-like-btn playlist-row-btn ${track.liked ? "text-red-400" : ""}" data-track-id="${trackId}" data-search-focus-key="like:${trackId}" type="button" title="Лайк" aria-label="${track.liked ? "Убрать из избранного" : "Добавить в избранное"}: ${escapeHtml(track.title)}" aria-pressed="${String(track.liked)}">
+            <svg class="w-4 h-4" fill="${track.liked ? "currentColor" : "none"}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+          </button>
+          <button class="search-add-btn playlist-row-btn" data-track-id="${trackId}" data-search-focus-key="add:${trackId}" type="button" title="Добавить в плейлист" aria-label="Добавить в плейлист: ${escapeHtml(track.title)}">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          </button>
+          <span class="search-track-duration">${playable ? track.durationLabel : "Недоступно"}</span>
+        </div>
+      `;
+    }).join("");
+
+    container.innerHTML = `
+      ${statusMarkup}
+      <div class="search-hybrid-grid">${bestMatchMarkup}${artistMatchMarkup}</div>
+      ${albumsMarkup ? `<div class="search-albums-heading"><span>Релизы</span><h2>Релизы с найденным треком</h2></div>${albumsMarkup}` : ""}
+      ${items.length ? `
+        <div class="search-track-heading">
+          <div><span>Каталог</span><h2>Треки</h2></div>
+          <span>${items.length} треков</span>
+        </div>
+        <div class="space-y-1 search-track-list">${trackRowsMarkup}</div>
+      ` : ""}
     `;
-    container.querySelector<HTMLElement>("[data-best-track-id]")?.addEventListener("click", (event) => {
+
+    wireRetry();
+    container.querySelector<HTMLButtonElement>("[data-best-track-id]:not([disabled])")?.addEventListener("click", (event) => {
       const id = getElementTrackId(event.currentTarget as HTMLElement, "data-best-track-id");
-      if (id) activateTrack(items, id);
+      if (id) activateTrack(playableItems, id);
     });
     container.querySelector<HTMLButtonElement>("[data-search-artist-id]")?.addEventListener("click", (event) => {
       const artistId = (event.currentTarget as HTMLButtonElement).dataset.searchArtistId;
@@ -3681,54 +3933,130 @@ function renderSearchResults(container: HTMLElement, query: string) {
     container.querySelector<HTMLImageElement>(".search-artist-avatar img")?.addEventListener("error", (event) => {
       (event.currentTarget as HTMLImageElement).remove();
     }, { once: true });
-    container.querySelectorAll<HTMLElement>(".search-track").forEach((el) => {
-      el.addEventListener("click", () => {
-        const id = getElementTrackId(el);
-        if (id) activateTrack(items, id);
+    container.querySelectorAll<HTMLImageElement>(".search-album-cover img").forEach((image) => {
+      image.addEventListener("error", () => image.remove(), { once: true });
+    });
+    container.querySelectorAll<HTMLButtonElement>("[data-play-album-id]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const albumTracks = (albumTrackQueues.get(button.dataset.playAlbumId || "") || []).filter(canPlayTrack);
+        if (albumTracks[0]) activateTrack(albumTracks, albumTracks[0].id);
       });
     });
-    container.querySelectorAll<HTMLElement>(".search-like-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const trackId = getElementTrackId(btn, "data-track-id");
+    container.querySelectorAll<HTMLButtonElement>(".search-album-track-play:not([disabled])").forEach((button) => {
+      button.addEventListener("click", () => {
+        const albumTracks = (albumTrackQueues.get(button.dataset.trackAlbumId || "") || []).filter(canPlayTrack);
+        const trackId = getElementTrackId(button, "data-album-track-id");
+        if (trackId) activateTrack(albumTracks, trackId);
+      });
+    });
+    container.querySelectorAll<HTMLButtonElement>(".search-track-play:not([disabled])").forEach((button) => {
+      button.addEventListener("click", () => {
+        const id = getElementTrackId(button, "data-search-track-id");
+        if (id) activateTrack(playableItems, id);
+      });
+    });
+    container.querySelectorAll<HTMLElement>(".search-like-btn, .search-album-like-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        const trackId = getElementTrackId(button, "data-track-id");
         if (trackId) toggleTrackLike(trackId);
-        renderBackendResults(items, message);
       });
     });
-    container.querySelectorAll<HTMLElement>(".search-add-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const trackId = getElementTrackId(btn, "data-track-id");
-        if (trackId) showPlaylistPopup(btn, trackId);
+    container.querySelectorAll<HTMLElement>(".search-add-btn, .search-album-add-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        const trackId = getElementTrackId(button, "data-track-id");
+        if (trackId) showPlaylistPopup(button, trackId);
       });
     });
     enhanceDynamicAccessibility(container);
     updateActiveTrackHighlight();
-  };
-  const mapSearchResults = (backendTracks: Awaited<ReturnType<typeof searchCatalog>>) =>
-    mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
-  const pollHydratedResults = (attempt: number, previousSignature: string, stableCount = 0) => {
-    if (attempt > 6 || stableCount >= 3) return;
-    window.setTimeout(() => {
-      if (!isCurrentSearch()) return;
-      searchCatalog(query, searchTargetLimit)
-        .then((backendTracks) => {
-          if (!isCurrentSearch()) return;
-          const items = mapSearchResults(backendTracks);
-          const nextSignature = searchResultsSignature(items);
-          const changed = nextSignature !== previousSignature;
-          if (changed) renderBackendResults(items);
-          const nextStableCount = changed ? 0 : stableCount + 1;
-          if (items.length < searchTargetLimit) {
-            pollHydratedResults(attempt + 1, nextSignature, nextStableCount);
-          }
-        })
-        .catch(() => {});
-    }, 2000);
+    restoreViewState(viewState);
+    setSearchPending(Boolean(status?.pending));
   };
 
+  const mapSearchResults = (backendTracks: Awaited<ReturnType<typeof searchCatalogOverview>>["tracks"]) => {
+    const mapped = mergeTracks(backendTracks.map((track) => mapBackendTrack(track)));
+    return prepareSearchTracks(mapped, query, { limit: searchTargetLimit });
+  };
+  const overviewSignature = (items: Track[], albums: BackendAlbum[]) => (
+    `${searchResultsSignature(items)}#${albumResultsSignature(albums)}`
+  );
+  const pollHydratedResults = (
+    attempt: number,
+    previousSignature: string,
+    legacyMode = false,
+  ) => {
+    const attemptLimit = legacyMode ? 3 : pollBackoff.length;
+    if (!isCurrentSearch() || attempt >= attemptLimit) {
+      if (isCurrentSearch()) {
+        renderBackendResults(visibleItems, visibleAlbums, {
+          message: legacyMode
+            ? "Показаны актуальные доступные совпадения. Релизы появятся после обновления сервера."
+            : "Каталог продолжает обновляться. Новые релизы появятся при следующем поиске.",
+          tone: "info",
+          retry: !legacyMode,
+        });
+      }
+      return;
+    }
+    activeSearchPollTimer = window.setTimeout(() => {
+      activeSearchPollTimer = null;
+      if (!isCurrentSearch()) return;
+      const request = legacyMode
+        ? searchCatalog(query, searchTargetLimit, controller.signal).then((resultTracks) => ({
+            tracks: resultTracks,
+            albums: [] as BackendAlbum[],
+            refresh_pending: true,
+            legacy_fallback: true,
+          }))
+        : searchCatalogOverview(query, searchTargetLimit, 3, controller.signal);
+      request
+        .then((result) => {
+          if (!isCurrentSearch()) return;
+          const items = mapSearchResults(result.tracks);
+          const nextSignature = overviewSignature(items, result.albums);
+          if (nextSignature !== previousSignature || !result.refresh_pending) {
+            renderBackendResults(items, result.albums, result.refresh_pending ? {
+              message: "Дополняем результаты релизами из каталога…",
+              tone: "info",
+              pending: true,
+            } : null);
+          }
+          if (result.refresh_pending) {
+            pollHydratedResults(
+              attempt + 1,
+              nextSignature,
+              legacyMode || Boolean(result.legacy_fallback),
+            );
+          } else {
+            setSearchPending(false);
+          }
+        })
+        .catch((error: unknown) => {
+          if (!isCurrentSearch() || (error instanceof DOMException && error.name === "AbortError")) return;
+          renderBackendResults(visibleItems, visibleAlbums, {
+            message: "Не удалось обновить результаты. Уже найденные треки можно продолжать слушать.",
+            tone: "error",
+            retry: true,
+          });
+        });
+    }, pollBackoff[attempt]);
+  };
+
+  if (!q) {
+    container.innerHTML = `
+      <div class="search-empty-state" role="status">
+        <div class="search-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></svg></div>
+        <h2>Введите название для поиска</h2>
+        <p>Можно искать треки, точные профили артистов и альбомы.</p>
+      </div>
+    `;
+    setSearchPending(false);
+    return;
+  }
+
+  setSearchPending(true);
   container.innerHTML = `
-    <div class="search-loading">
+    <div class="search-loading" role="status" aria-live="polite">
       <div class="track-skeleton"></div>
       <div>
         <h2 class="text-base font-semibold mb-1">Ищем в каталоге</h2>
@@ -3736,29 +4064,63 @@ function renderSearchResults(container: HTMLElement, query: string) {
       </div>
     </div>
   `;
-  void getOnboardingArtists({ search: query, page: 1, limit: 1 })
+  void getOnboardingArtists({ search: query, page: 1, limit: 5, signal: controller.signal })
     .then((response) => {
       if (!isCurrentSearch()) return;
-      canonicalArtist = response.items[0] ?? null;
-      if (hasRenderedResults) renderBackendResults(visibleItems, visibleMessage);
+      canonicalArtist = response.items.find((artist) => isExactArtistSearch(artist.name, query)) ?? null;
+      if (hasRenderedResults) renderBackendResults(visibleItems, visibleAlbums, visibleStatus);
     })
-    .catch(() => { /* Track search remains fully usable without an artist match. */ });
-  const showSavedSearchResults = () => {
+    .catch((error: unknown) => {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        // Track and album search remains usable without an exact artist card.
+      }
+    });
+  activeSearchFallbackTimer = window.setTimeout(() => {
+    activeSearchFallbackTimer = null;
     if (!isCurrentSearch()) return;
-    renderBackendResults(localResults(), "Каталог временно недоступен. Показаны сохранённые результаты.");
-  };
-  const searchFallbackTimer = window.setTimeout(showSavedSearchResults, 2500);
-  searchCatalog(query, searchTargetLimit)
-    .then((backendTracks) => {
-      window.clearTimeout(searchFallbackTimer);
+    renderBackendResults(localResults(), [], {
+      message: "Сервер отвечает медленно. Пока показаны сохранённые совпадения.",
+      tone: "info",
+      pending: true,
+    });
+  }, 2500);
+  searchCatalogOverview(query, searchTargetLimit, 3, controller.signal)
+    .then((result) => {
+      if (activeSearchFallbackTimer !== null) window.clearTimeout(activeSearchFallbackTimer);
+      activeSearchFallbackTimer = null;
       if (!isCurrentSearch()) return;
-      const items = mapSearchResults(backendTracks);
-      renderBackendResults(items);
-      pollHydratedResults(1, searchResultsSignature(items));
+      const items = mapSearchResults(result.tracks);
+      const status: SearchRenderStatus | null = result.refresh_pending
+        ? {
+            message: result.legacy_fallback
+              ? "Обновляем каталог и проверяем новые совпадения…"
+              : "Дополняем результаты релизами из каталога…",
+            tone: "info",
+            pending: true,
+          }
+        : null;
+      renderBackendResults(items, result.albums, status);
+      announce(`Найдено: ${items.length} треков${result.albums.length ? ` и ${result.albums.length} релизов` : ""}`);
+      if (result.refresh_pending) {
+        pollHydratedResults(
+          0,
+          overviewSignature(items, result.albums),
+          Boolean(result.legacy_fallback),
+        );
+      } else {
+        setSearchPending(false);
+      }
     })
-    .catch(() => {
-      window.clearTimeout(searchFallbackTimer);
-      showSavedSearchResults();
+    .catch((error: unknown) => {
+      if (activeSearchFallbackTimer !== null) window.clearTimeout(activeSearchFallbackTimer);
+      activeSearchFallbackTimer = null;
+      if (!isCurrentSearch() || (error instanceof DOMException && error.name === "AbortError")) return;
+      renderBackendResults(localResults(), [], {
+        message: "Каталог сейчас недоступен. Показаны сохранённые совпадения.",
+        tone: "error",
+        retry: true,
+      });
+      setSearchPending(false);
     });
 }
 
@@ -4983,30 +5345,49 @@ function initScrollbar() {
 // ----------------------------------------------------------------
 
 function submitSearch() {
-  const val = searchInput.value.trim();
-  if (!val) return;
+  const val = sanitizeSearchQuery(searchInput.value);
+  if (!normalizeSearchText(val)) {
+    clearSearchBtn.classList.toggle("hidden", !searchInput.value.trim());
+    announce("Введите название трека, артиста или альбома");
+    searchInput.focus();
+    return;
+  }
   searchInput.value = val;
   clearSearchBtn.classList.remove("hidden");
   switchPage("search", val);
 }
 
 searchInput.addEventListener("input", () => {
-  const val = searchInput.value.trim();
-  clearSearchBtn.classList.toggle("hidden", !val);
+  const hasText = Boolean(searchInput.value.trim());
+  clearSearchBtn.classList.toggle("hidden", !hasText);
+  if (!hasText && currentPage === "search") switchPage("home");
 });
 
 searchInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
+  if (e.key === "Enter" && !e.isComposing) {
     e.preventDefault();
     e.stopPropagation();
     submitSearch();
   }
-  if (e.key === "Escape") { searchInput.value = ""; clearSearchBtn.classList.add("hidden"); switchPage("home"); }
+  if (e.key === "Escape") {
+    searchInput.value = "";
+    clearSearchBtn.classList.add("hidden");
+    if (currentPage === "search") switchPage("home");
+  }
 });
 
 searchSubmitBtn.addEventListener("click", submitSearch);
 
-clearSearchBtn.addEventListener("click", () => { searchInput.value = ""; clearSearchBtn.classList.add("hidden"); switchPage("home"); searchInput.focus(); });
+const clearSearch = () => {
+  searchInput.value = "";
+  clearSearchBtn.classList.add("hidden");
+  if (currentPage === "search") switchPage("home");
+  searchInput.focus();
+};
+clearSearchBtn.addEventListener("click", clearSearch);
+searchInput.addEventListener("search", () => {
+  if (!searchInput.value.trim()) clearSearch();
+});
 
 // ----------------------------------------------------------------
 // ----------------------------------------------------------------

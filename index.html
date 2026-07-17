@@ -36,7 +36,8 @@
 
       <div class="search-island flex items-center justify-between px-6 py-3 flex-1 max-w-md" role="search" aria-label="Поиск по музыке">
         <label class="sr-only" for="searchInput">Найти трек, исполнителя или альбом</label>
-        <input id="searchInput" type="search" placeholder="Треки, артисты и альбомы" autocomplete="off" enterkeyhint="search" class="w-full bg-transparent text-base text-white/80 placeholder-white/40 outline-none border-none" />
+        <input id="searchInput" type="search" placeholder="Треки, артисты и альбомы" autocomplete="off" enterkeyhint="search" maxlength="128" spellcheck="false" autocapitalize="none" aria-describedby="searchHint" class="w-full bg-transparent text-base text-white/80 placeholder-white/40 outline-none border-none" />
+        <span id="searchHint" class="sr-only">Введите название и нажмите Enter. Для быстрого перехода к поиску используйте Control K.</span>
         <button id="clearSearch" class="text-white/40 hover:text-white/80 transition-all duration-300 hidden shrink-0 cursor-pointer active:scale-90" type="button" title="Очистить поиск" aria-label="Очистить поиск">
           <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
         </button>

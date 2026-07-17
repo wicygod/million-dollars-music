@@ -6,6 +6,7 @@ import {
   mapBackendTrack,
   resolveBackendImageUrl,
   saveMusicPreferences,
+  searchCatalogOverview,
   submitPlaybackEvent,
 } from "./musicApi";
 
@@ -21,6 +22,13 @@ function installStorage(): void {
 function jsonResponse(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
     status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function errorResponse(status: number, detail = "error"): Response {
+  return new Response(JSON.stringify({ detail }), {
+    status,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -202,5 +210,50 @@ describe("personalization API contracts", () => {
     expect(resolveBackendImageUrl("https://cdn.example/avatar.jpg")).toBe("https://cdn.example/avatar.jpg");
     expect(resolveBackendImageUrl("javascript:alert(1)")).toBeNull();
     expect(resolveBackendImageUrl("data:image/svg+xml,<svg onload=alert(1) />")).toBeNull();
+  });
+});
+
+describe("catalog search compatibility", () => {
+  it("uses the legacy endpoint only when overview is unavailable", async () => {
+    installStorage();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(errorResponse(404))
+      .mockResolvedValueOnce(jsonResponse([{ id: 7, title: "Legacy result" }]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await searchCatalogOverview("Legacy", 40);
+
+    expect(result).toMatchObject({
+      albums: [],
+      refresh_pending: true,
+      legacy_fallback: true,
+    });
+    expect(result.tracks[0].id).toBe(7);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not hide server errors behind a legacy request", async () => {
+    installStorage();
+    const fetchMock = vi.fn().mockResolvedValue(errorResponse(500));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(searchCatalogOverview("Failure")).rejects.toMatchObject({ status: 500 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes external cancellation to the active request", async () => {
+    installStorage();
+    const fetchMock = vi.fn().mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      })
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const request = searchCatalogOverview("Cancel me", 20, 3, controller.signal);
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
